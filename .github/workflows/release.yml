@@ -53,6 +53,9 @@ jobs:
       - name: 上传到GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
+          # 与上方zip名称保持一致，替换项目名
           files: nuna-windows-x64-${{ github.ref_name }}.zip
           draft: false
           prerelease: false
+          # 2. 可选：显式指定token（默认用GITHUB_TOKEN，权限已通过permissions配置）
+          token: ${{ secrets.GITHUB_TOKEN }}
