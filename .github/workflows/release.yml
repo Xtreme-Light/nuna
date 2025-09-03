@@ -83,6 +83,20 @@ jobs:
     if: github.event_name == 'push'  # 仅在push事件时执行
     runs-on: windows-latest
     steps:
+      - name: 显示构建产物名称（调试用）
+        run: |
+          echo "需要上传的文件: ${{ needs.build-windows.outputs.zip-name }}"
+        shell: pwsh
+
+      - name: 验证文件存在性
+        shell: pwsh
+        run: |
+          $zipName = "${{ needs.build-windows.outputs.zip-name }}"
+          if (-not (Test-Path $zipName)) {
+              Write-Error "文件 $zipName 不存在，无法上传"
+              exit 1
+          }
+
       - name: 上传构建产物到工件
         uses: actions/upload-artifact@v4
         with:
