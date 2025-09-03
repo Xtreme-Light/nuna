@@ -73,7 +73,7 @@ jobs:
 #          # 2. 可选：显式指定token（默认用GITHUB_TOKEN，权限已通过permissions配置）
 #          token: ${{ secrets.GITHUB_TOKEN }}
       - name: 上传构建产物
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: windows-build  # 产物名称
           path: nuna-windows-x64-*.zip  # 匹配生成的zip文件
