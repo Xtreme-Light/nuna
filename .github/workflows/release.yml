@@ -94,7 +94,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: 下载临时ZIP文件
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: temp-build-zip
 
@@ -118,7 +118,7 @@ jobs:
 
       # 新增步骤：下载临时工件（获取build-windows生成的ZIP）
       - name: 下载临时ZIP文件
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: temp-build-zip  # 与上传时的名称一致
 
