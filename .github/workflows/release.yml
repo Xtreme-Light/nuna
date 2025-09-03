@@ -6,6 +6,9 @@ on:
     types: [created]
   push:
     branches: [ "master" ]
+    paths-ignore:
+      - '**.md'  # 忽略所有Markdown文件的修改
+      - 'docs/**'  # 忽略docs目录下的修改
   pull_request:
     branches: [ "master" ]
 
