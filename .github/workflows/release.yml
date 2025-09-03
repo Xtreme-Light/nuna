@@ -55,7 +55,7 @@ jobs:
         shell: pwsh
         run: |
           # 获取版本号（从Release标签提取，如v1.0.0）
-#          $version = "${{ github.ref_name }}"
+          # $version = "${{ github.ref_name }}"
           $commitHash = "${{ github.sha }}".Substring(0, 8)  # 取前8位哈希
           $zipName = "nuna-windows-x64-$commitHash.zip"
           
