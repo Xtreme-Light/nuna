@@ -51,7 +51,8 @@ jobs:
               Write-Warning "Interception目录未找到"
           }
 
-      - name: 打包为zip
+      - name: 打包为zip并输出文件名
+        id: package
         shell: pwsh
         run: |
           # 根据触发条件生成不同的文件名
@@ -62,8 +63,21 @@ jobs:
               $commitHash = "${{ github.sha }}".Substring(0, 8)
               $zipName = "nuna-windows-x64-$commitHash.zip"
           }
+          # 执行打包
           Compress-Archive -Path "release_dir/*" -DestinationPath $zipName -Force
-          echo "zip-name=$zipName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          
+          # 再次验证文件存在
+          if (-not (Test-Path $zipName)) {
+              Write-Error "打包失败，未生成 $zipName"
+              exit 1
+          }
+          
+          # 关键修复：正确使用正确的PowerShell语法输出环境变量
+          echo "zip-name=$zipName" >> $env:GITHUB_OUTPUT
+          
+          # 调试输出
+          Write-Host "生成的ZIP文件: $zipName"
+          Write-Host "输出变量: $(Get-Content $env:GITHUB_OUTPUT)"
 
   # 创建Release时：上传到GitHub Releases
   upload-release:
@@ -92,10 +106,15 @@ jobs:
         shell: pwsh
         run: |
           $zipName = "${{ needs.build-windows.outputs.zip-name }}"
-          if (-not (Test-Path $zipName)) {
-              Write-Error "文件 $zipName 不存在，无法上传"
+          if ([string]::IsNullOrEmpty($zipName)) {
+              Write-Error "zip-name为空，无法继续"
               exit 1
           }
+          if (-not (Test-Path $zipName)) {
+              Write-Error "文件 $zipName 不存在"
+              exit 1
+          }
+
 
       - name: 上传构建产物到工件
         uses: actions/upload-artifact@v4
