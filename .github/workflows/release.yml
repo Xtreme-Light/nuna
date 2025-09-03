@@ -1,0 +1,56 @@
+name: Windows Build and Release
+
+# 仅在创建新Release时触发
+on:
+  release:
+    types: [created]
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 安装Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          target: x86_64-pc-windows-msvc  # Windows x64目标
+
+      - name: 构建Release版本
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: 准备打包文件
+        shell: pwsh
+        run: |
+          # 创建临时打包目录
+          New-Item -ItemType Directory -Path release_dir | Out-Null
+          
+          # 复制可执行文件（替换为你的项目名称）
+          $exePath = "target/x86_64-pc-windows-msvc/release/nuna.exe"
+          Copy-Item -Path $exePath -Destination "release_dir/"
+          
+          # 复制Interception目录（保持结构）
+          if (Test-Path "Interception") {
+              Copy-Item -Path "Interception" -Destination "release_dir/" -Recurse
+          } else {
+              Write-Warning "Interception目录未找到"
+          }
+
+      - name: 打包为zip
+        shell: pwsh
+        run: |
+          # 获取版本号（从Release标签提取，如v1.0.0）
+          $version = "${{ github.ref_name }}"
+          $zipName = "nuna-windows-x64-$version.zip"
+          
+          # 压缩目录
+          Compress-Archive -Path "release_dir/*" -DestinationPath $zipName -Force
+
+      - name: 上传到GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          files: nuna-windows-x64-${{ github.ref_name }}.zip
+          draft: false
+          prerelease: false
