@@ -79,18 +79,32 @@ jobs:
           Write-Host "生成的ZIP文件: $zipName"
           Write-Host "输出变量: $(Get-Content $env:GITHUB_OUTPUT)"
 
+      - name: 临时保存ZIP文件
+        uses: actions/upload-artifact@v4
+        with:
+          name: temp-build-zip  # 临时工件名称
+          path: ${{ steps.package.outputs.zip-name }}
+          retention-days: 1  # 临时保存1天
+
+
   # 创建Release时：上传到GitHub Releases
   upload-release:
     needs: build-windows
     if: github.event_name == 'release'  # 仅在release事件时执行
     runs-on: windows-latest
     steps:
+      - name: 下载临时ZIP文件
+        uses: actions/download-artifact@v4
+        with:
+          name: temp-build-zip
+
       - name: 上传到GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ needs.build-windows.outputs.zip-name }}
           draft: false
           prerelease: false
+
   # main分支变动时：上传到Actions工件
   upload-artifact:
     needs: build-windows
@@ -101,6 +115,12 @@ jobs:
         run: |
           echo "需要上传的文件: ${{ needs.build-windows.outputs.zip-name }}"
         shell: pwsh
+
+      # 新增步骤：下载临时工件（获取build-windows生成的ZIP）
+      - name: 下载临时ZIP文件
+        uses: actions/download-artifact@v4
+        with:
+          name: temp-build-zip  # 与上传时的名称一致
 
       - name: 验证文件存在性
         shell: pwsh
