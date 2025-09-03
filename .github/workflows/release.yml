@@ -9,8 +9,6 @@ on:
     paths-ignore:
       - '**.md'  # 忽略所有Markdown文件的修改
       - 'docs/**'  # 忽略docs目录下的修改
-  pull_request:
-    branches: [ "master" ]
 
 # 必要的权限配置
 permissions:
@@ -19,6 +17,8 @@ permissions:
 jobs:
   build-windows:
     runs-on: windows-latest
+    outputs:
+      zip-name: ${{ steps.package.outputs.zip-name }}  # 输出zip文件名供后续步骤使用
     permissions: write-all
 
     steps:
@@ -54,27 +54,38 @@ jobs:
       - name: 打包为zip
         shell: pwsh
         run: |
-          # 获取版本号（从Release标签提取，如v1.0.0）
-          # $version = "${{ github.ref_name }}"
-          $commitHash = "${{ github.sha }}".Substring(0, 8)  # 取前8位哈希
-          $zipName = "nuna-windows-x64-$commitHash.zip"
-          
-          # 压缩目录
+          # 根据触发条件生成不同的文件名
+          if ("${{ github.event_name }}" -eq "release") {
+              $version = "${{ github.ref_name }}"
+              $zipName = "nuna-windows-x64-$version.zip"
+          } else {
+              $commitHash = "${{ github.sha }}".Substring(0, 8)
+              $zipName = "nuna-windows-x64-$commitHash.zip"
+          }
           Compress-Archive -Path "release_dir/*" -DestinationPath $zipName -Force
+          echo "zip-name=$zipName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
-#      - name: 上传到GitHub Releases
-#        uses: softprops/action-gh-release@v2
-#        with:
-#          # 与上方zip名称保持一致，替换项目名
-##          files: nuna-windows-x64-${{ github.ref_name }}.zip
-#          files: nuna-windows-x64-*.zip
-#          draft: false
-#          prerelease: false
-#          # 2. 可选：显式指定token（默认用GITHUB_TOKEN，权限已通过permissions配置）
-#          token: ${{ secrets.GITHUB_TOKEN }}
-      - name: 上传构建产物
+  # 创建Release时：上传到GitHub Releases
+  upload-release:
+    needs: build-windows
+    if: github.event_name == 'release'  # 仅在release事件时执行
+    runs-on: windows-latest
+    steps:
+      - name: 上传到GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ needs.build-windows.outputs.zip-name }}
+          draft: false
+          prerelease: false
+  # main分支变动时：上传到Actions工件
+  upload-artifact:
+    needs: build-windows
+    if: github.event_name == 'push'  # 仅在push事件时执行
+    runs-on: windows-latest
+    steps:
+      - name: 上传构建产物到工件
         uses: actions/upload-artifact@v4
         with:
-          name: windows-build  # 产物名称
-          path: nuna-windows-x64-*.zip  # 匹配生成的zip文件
-          retention-days: 7  # 产物保留7天（可调整）
+          name: windows-build-${{ github.sha }}
+          path: ${{ needs.build-windows.outputs.zip-name }}
+          retention-days: 7  # 保留7天
