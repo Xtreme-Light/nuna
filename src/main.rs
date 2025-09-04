@@ -110,7 +110,7 @@ fn main() -> Result<()> {
                                         information,
                                     }],
                                 );
-                                
+
                             }
                             // capslock释放时重置caps_combination状态
                             caps_combination = false;
@@ -196,7 +196,7 @@ fn main() -> Result<()> {
                                     };
                                     intercept.send(dev, &[left_simulating]);
                                     continue;
-                                }
+                                },
                                 // ctrl + right
                                 ScanCode::F => {
                                     // 开始模拟ctrl键位
@@ -207,18 +207,35 @@ fn main() -> Result<()> {
                                     };
                                     intercept.send(dev, &[ctrl_simulating]);
                                     let right_simulating = Stroke::Keyboard {
-                                        code: ScanCode::Numpad4,
+                                        code: ScanCode::Numpad6,
                                         state: e0_extra_key_state(state),
                                         information,
                                     };
                                     intercept.send(dev, &[right_simulating]);
                                     continue;
-                                }
-                                // 所有其他情况都使用 ctrl_simulating，第一个参数为当前的 code
-                                _ => {
+                                },
+                                ScanCode::Z => {
                                     // ctrl + c  ,ctrl + v , ctrl + z ,ctrl + x
-                                    ctrl_simulating(code, &intercept, dev, state, information);
+                                    ctrl_simulating(ScanCode::Z, &intercept, dev, state, information);
                                     continue;
+                                },
+                                ScanCode::X => {
+                                    // ctrl + c  ,ctrl + v , ctrl + z ,ctrl + x
+                                    ctrl_simulating(ScanCode::X, &intercept, dev, state, information);
+                                    continue;
+                                },
+                                ScanCode::C => {
+                                    // ctrl + c  ,ctrl + v , ctrl + z ,ctrl + x
+                                    ctrl_simulating(ScanCode::C, &intercept, dev, state, information);
+                                    continue;
+                                },
+                                ScanCode::V => {
+                                    // ctrl + c  ,ctrl + v , ctrl + z ,ctrl + x
+                                    ctrl_simulating(ScanCode::V, &intercept, dev, state, information);
+                                    continue;
+                                },
+                                _ => {
+                                    original_stroke
                                 }
                             };
                             intercept.send(dev, &[mapped_stroke]);
