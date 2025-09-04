@@ -7,13 +7,13 @@ mod oscode;
 
 use std::collections::HashSet;
 // 导入所需的外部库和模块
+use crate::oscode::OsCode;
+use anyhow::Result;
 use kanata_interception as ic;
 use kanata_interception::{Device, Interception, KeyState, ScanCode, Stroke};
 use log::LevelFilter;
 use simplelog::{ColorChoice, CombinedLogger, ConfigBuilder, TermLogger, TerminalMode};
-use anyhow::Result;
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyboardState};
-use crate::oscode::OsCode;
+use windows::Win32::UI::Input::KeyboardAndMouse::GetKeyboardState;
 
 /// 程序入口函数
 /// 初始化日志系统、拦截驱动，然后进入事件循环处理键盘事件
@@ -58,6 +58,8 @@ fn main() -> Result<()> {
     let mut capslock_active = false;
     // 用于跟踪已处理的按键，避免重复发送
     let mut processed_keys = HashSet::new();
+    // 是否使用CapsLock进行了组合按键使用
+    let mut caps_combination = false;
     // 事件处理主循环：持续监听并处理键盘事件
     loop {
         // 等待键盘事件，超时时间为 1 毫秒（避免阻塞过久）
@@ -70,76 +72,168 @@ fn main() -> Result<()> {
 
             // 遍历处理每个接收到的事件
             for i in 0..num_strokes {
-                let original_stroke = strokes[i];  // 复制当前事件（用于可能的修改）
+                let original_stroke = strokes[i]; // 复制当前事件（用于可能的修改）
 
                 // 处理 CapsLock 键映射：将 CapsLock 替换为 Left Ctrl
-                if let Stroke::Keyboard { code, state, information } = original_stroke {
+                if let Stroke::Keyboard {
+                    code,
+                    state,
+                    information,
+                } = original_stroke
+                {
                     // 1. 先处理CapsLock本身：禁用原生大小写切换，仅标记激活状态
 
                     // 打印原始扫描码的十六进制值
                     log::info!("原始扫描码: {:#x}", code as u16);
+                    
                     if code == ScanCode::CapsLock {
                         // 标记CapsLock状态，不发送原始事件(避免大小写切换)
                         capslock_active = !state.contains(KeyState::UP);
-                        log::info!("CapsLock状态变更为: {}", if capslock_active { "激活" } else { "关闭" });
+                        log::info!(
+                            "CapsLock状态变更为: {}",
+                            if capslock_active { "激活" } else { "关闭" }
+                        );
                         // 如果是释放事件，清空已处理按键集
-                        if state.contains(KeyState::UP) {
+                        if !capslock_active {
                             processed_keys.clear();
+                            if !caps_combination {
+                                // 如果没有使用capslock进行组合按键使用,在按键释放的时候发送Esc模拟按键
+                                intercept.send(
+                                    dev,
+                                    &[Stroke::Keyboard {
+                                        code: ScanCode::Esc,
+                                        state:KeyState::DOWN,
+                                        information,
+                                    }],
+                                );
+                                intercept.send(
+                                    dev,
+                                    &[Stroke::Keyboard {
+                                        code: ScanCode::Esc,
+                                        state:KeyState::UP,
+                                        information,
+                                    }],
+                                );
+                                log::info!("发送Esc键位");
+                                
+                            }
+                            // capslock释放时重置caps_combination状态
+                            caps_combination = false;
                         }
+
                         continue; // 不发送原始CapsLock事件
                     }
 
                     // 当CapsLock激活时处理组合键
 
                     if capslock_active {
+                        // 确认开始使用组合按键
+                        caps_combination = true;
                         // 检查是否已处理过该按键，避免重复处理
                         if processed_keys.contains(&code) && state.contains(KeyState::UP) {
                             processed_keys.remove(&code);
-                        }else if !processed_keys.contains(&code) {
+                        } else if !processed_keys.contains(&code) {
                             processed_keys.insert(code);
                             // 根据不同按键进行映射
 
                             let mapped_stroke = match code {
-                                // ctrl+v
-                                ScanCode::V => {
-                                    ctrl_simulating(ScanCode::V, &intercept, dev, state, information);
-                                    continue;
+                                // Ctrl +Space = Backspace
+                                ScanCode::Space => Stroke::Keyboard {
+                                    code: ScanCode::Backspace,
+                                    state,
+                                    information,
+                                },
+                                // Ctrl +D = Del
+                                ScanCode::D => Stroke::Keyboard {
+                                    code: ScanCode::NumpadPeriod,
+                                    state: e0_extra_key_state(state),
+                                    information,
+                                },
+                                // Ctrl +A = Home
+                                ScanCode::A => Stroke::Keyboard {
+                                    code: ScanCode::Numpad7,
+                                    state: e0_extra_key_state(state),
+                                    information,
+                                },
+                                // Ctrl + E = End
+                                ScanCode::E => Stroke::Keyboard {
+                                    code: ScanCode::Numpad1,
+                                    state: e0_extra_key_state(state),
+                                    information,
                                 },
                                 // 方向左键
-                                ScanCode::H =>Stroke::Keyboard {
+                                ScanCode::H => Stroke::Keyboard {
                                     code: ScanCode::Numpad4,
-                                    state:e0_extra_key_state(state),
+                                    state: e0_extra_key_state(state),
                                     information,
                                 },
                                 // 方向右键
-                                ScanCode::L =>Stroke::Keyboard {
+                                ScanCode::L => Stroke::Keyboard {
                                     code: ScanCode::Numpad6,
-                                    state:e0_extra_key_state(state),
+                                    state: e0_extra_key_state(state),
                                     information,
                                 },
                                 // 方向上键
-                                ScanCode::J =>Stroke::Keyboard {
+                                ScanCode::J => Stroke::Keyboard {
                                     code: ScanCode::Numpad8,
-                                    state:e0_extra_key_state(state),
+                                    state: e0_extra_key_state(state),
                                     information,
                                 },
                                 // 方向下键
-                                ScanCode::K =>Stroke::Keyboard {
+                                ScanCode::K => Stroke::Keyboard {
                                     code: ScanCode::Numpad2,
-                                    state:e0_extra_key_state(state),
+                                    state: e0_extra_key_state(state),
                                     information,
                                 },
-                                _=>original_stroke
+                                // ctrl + left
+                                ScanCode::B => {
+                                    // 开始模拟ctrl键位
+                                    let ctrl_simulating = Stroke::Keyboard {
+                                        code: ScanCode::LeftControl,
+                                        state,
+                                        information,
+                                    };
+                                    log::info!("发送模拟事件: left-control");
+                                    intercept.send(dev, &[ctrl_simulating]);
+                                    let left_simulating = Stroke::Keyboard {
+                                        code: ScanCode::Numpad4,
+                                        state: e0_extra_key_state(state),
+                                        information,
+                                    };
+                                    log::info!("发送模拟事件: left");
+                                    intercept.send(dev, &[left_simulating]);
+                                    continue;
+                                }
+                                // ctrl + right
+                                ScanCode::F => {
+                                    // 开始模拟ctrl键位
+                                    let ctrl_simulating = Stroke::Keyboard {
+                                        code: ScanCode::LeftControl,
+                                        state,
+                                        information,
+                                    };
+                                    log::info!("发送模拟事件: left-control");
+                                    intercept.send(dev, &[ctrl_simulating]);
+                                    let right_simulating = Stroke::Keyboard {
+                                        code: ScanCode::Numpad4,
+                                        state: e0_extra_key_state(state),
+                                        information,
+                                    };
+                                    log::info!("发送模拟事件: right");
+                                    intercept.send(dev, &[right_simulating]);
+                                    continue;
+                                }
+                                // 所有其他情况都使用 ctrl_simulating，第一个参数为当前的 code
+                                _ => {
+                                    // ctrl + c  ,ctrl + v , ctrl + z ,ctrl + x
+                                    ctrl_simulating(code, &intercept, dev, state, information);
+                                    continue;
+                                }
                             };
-                            log::info!(
-                                "组合键映射: {:?} -> {:?}",
-                                original_stroke,
-                                mapped_stroke
-                            );
+                            log::info!("组合键映射: {:?} -> {:?}", original_stroke, mapped_stroke);
                             intercept.send(dev, &[mapped_stroke]);
                             continue;
                         }
-
                     }
                 }
 
@@ -170,17 +264,23 @@ fn init_log() {
 
     // 初始化组合日志器，使用终端日志输出
     CombinedLogger::init(vec![TermLogger::new(
-        LevelFilter::Info,               // 日志级别为 Info
-        log_config.build(),              // 使用上述配置
-        TerminalMode::Mixed,             // 混合模式（ stdout 和 stderr）
-        ColorChoice::Auto,               // 自动选择颜色（根据终端支持）
+        LevelFilter::Info,   // 日志级别为 Info
+        log_config.build(),  // 使用上述配置
+        TerminalMode::Mixed, // 混合模式（ stdout 和 stderr）
+        ColorChoice::Auto,   // 自动选择颜色（根据终端支持）
     )])
-        .expect("日志初始化失败");  // 若初始化失败则终止程序并提示
+    .expect("日志初始化失败"); // 若初始化失败则终止程序并提示
     log::info!("日志初始化成功");
 }
 
 /// 发送Ctrl 相关的模拟事件
-fn ctrl_simulating(scan_code: ScanCode,intercept: &Interception, dev: Device, state: KeyState, information: u32) {
+fn ctrl_simulating(
+    scan_code: ScanCode,
+    intercept: &Interception,
+    dev: Device,
+    state: KeyState,
+    information: u32,
+) {
     // 开始模拟ctrl键位
     let ctrl_simulating = Stroke::Keyboard {
         code: ScanCode::LeftControl,
@@ -195,7 +295,7 @@ fn ctrl_simulating(scan_code: ScanCode,intercept: &Interception, dev: Device, st
         information,
     };
     intercept.send(dev, &[c_simulating]);
-    log::info!("发送模拟事件: {}",scan_code as u16);
+    log::info!("发送模拟事件: {}", scan_code as u16);
 }
 
 // 2. 处理E0扩展键序列（左方向键的核心逻辑）
@@ -209,7 +309,8 @@ fn e0_extra_key_state(state: KeyState) -> KeyState {
         KeyState::E0
     };
     new_state
-}/// 检查当前是否所有按键都处于释放状态
+}
+/// 检查当前是否所有按键都处于释放状态
 fn are_all_keys_released() -> bool {
     let mut key_states = [0u8; 256]; // 存储所有虚拟键的状态（0-255）
     // 一次性获取所有键的状态
@@ -230,6 +331,6 @@ fn are_all_keys_released() -> bool {
         }
     }
     log::info!("所有按键均已释放");
-    
+
     true
 }
