@@ -84,15 +84,11 @@ fn main() -> Result<()> {
                     // 1. 先处理CapsLock本身：禁用原生大小写切换，仅标记激活状态
 
                     // 打印原始扫描码的十六进制值
-                    log::info!("原始扫描码: {:#x}", code as u16);
+                    log::debug!("原始扫描码: {:#x}", code as u16);
                     
                     if code == ScanCode::CapsLock {
                         // 标记CapsLock状态，不发送原始事件(避免大小写切换)
                         capslock_active = !state.contains(KeyState::UP);
-                        log::info!(
-                            "CapsLock状态变更为: {}",
-                            if capslock_active { "激活" } else { "关闭" }
-                        );
                         // 如果是释放事件，清空已处理按键集
                         if !capslock_active {
                             processed_keys.clear();
@@ -114,7 +110,6 @@ fn main() -> Result<()> {
                                         information,
                                     }],
                                 );
-                                log::info!("发送Esc键位");
                                 
                             }
                             // capslock释放时重置caps_combination状态
@@ -193,14 +188,12 @@ fn main() -> Result<()> {
                                         state,
                                         information,
                                     };
-                                    log::info!("发送模拟事件: left-control");
                                     intercept.send(dev, &[ctrl_simulating]);
                                     let left_simulating = Stroke::Keyboard {
                                         code: ScanCode::Numpad4,
                                         state: e0_extra_key_state(state),
                                         information,
                                     };
-                                    log::info!("发送模拟事件: left");
                                     intercept.send(dev, &[left_simulating]);
                                     continue;
                                 }
@@ -212,14 +205,12 @@ fn main() -> Result<()> {
                                         state,
                                         information,
                                     };
-                                    log::info!("发送模拟事件: left-control");
                                     intercept.send(dev, &[ctrl_simulating]);
                                     let right_simulating = Stroke::Keyboard {
                                         code: ScanCode::Numpad4,
                                         state: e0_extra_key_state(state),
                                         information,
                                     };
-                                    log::info!("发送模拟事件: right");
                                     intercept.send(dev, &[right_simulating]);
                                     continue;
                                 }
@@ -230,7 +221,6 @@ fn main() -> Result<()> {
                                     continue;
                                 }
                             };
-                            log::info!("组合键映射: {:?} -> {:?}", original_stroke, mapped_stroke);
                             intercept.send(dev, &[mapped_stroke]);
                             continue;
                         }
@@ -239,13 +229,13 @@ fn main() -> Result<()> {
 
                 // 记录事件信息到日志
                 // 尝试将事件转换为操作系统编码并显示，若失败则显示"未知的映射信息"
-                log::info!(
-                    "拦截到键盘事件: {:?}，对应操作系统编码: {}",
-                    original_stroke,
-                    OsCode::try_from(original_stroke)
-                        .map(|osc| osc.as_u16().to_string())
-                        .unwrap_or_else(|_| "未知的映射信息".into()),
-                );
+                // log::debug!(
+                //     "拦截到键盘事件: {:?}，对应操作系统编码: {}",
+                //     original_stroke,
+                //     OsCode::try_from(original_stroke)
+                //         .map(|osc| osc.as_u16().to_string())
+                //         .unwrap_or_else(|_| "未知的映射信息".into()),
+                // );
 
                 // 将处理后的事件发送出去（若有映射则发送修改后的值）
                 intercept.send(dev, &[original_stroke]);
@@ -287,7 +277,6 @@ fn ctrl_simulating(
         state,
         information,
     };
-    log::info!("发送模拟事件: left-control");
     intercept.send(dev, &[ctrl_simulating]);
     let c_simulating = Stroke::Keyboard {
         code: scan_code,
@@ -295,7 +284,6 @@ fn ctrl_simulating(
         information,
     };
     intercept.send(dev, &[c_simulating]);
-    log::info!("发送模拟事件: {}", scan_code as u16);
 }
 
 // 2. 处理E0扩展键序列（左方向键的核心逻辑）
