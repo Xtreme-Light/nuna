@@ -59,10 +59,10 @@ fn main() -> Result<()> {
                 } = original_stroke
                 {
                     // 打印原始扫描码的十六进制值
-                    log::info!("原始扫描码: {:#x}", code as u16);
-                    log::info!("原始状态: {:?}", state );
-                    log::info!("capslock是否激活: {}", capslock_active);
-                    log::info!("caps_combination是否使用: {}", caps_combination );
+                    log::debug!("原始扫描码: {:#x}", code as u16);
+                    log::debug!("原始状态: {:?}", state );
+                    log::debug!("capslock是否激活: {}", capslock_active);
+                    log::debug!("caps_combination是否使用: {}", caps_combination );
                     if code == ScanCode::CapsLock {
                         // 标记CapsLock状态，不发送原始事件(避免大小写切换)
                         capslock_active = !state.contains(KeyState::UP);
