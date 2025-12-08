@@ -5,16 +5,17 @@
 mod keys;
 mod oscode;
 
-use std::collections::HashSet;
 // 导入所需的外部库和模块
+use crate::keys::all_scan_codes;
 use crate::oscode::OsCode;
 use anyhow::Result;
 use kanata_interception as ic;
 use kanata_interception::{Device, Interception, KeyState, ScanCode, Stroke};
 use log::LevelFilter;
 use simplelog::{ColorChoice, CombinedLogger, ConfigBuilder, TermLogger, TerminalMode};
+use std::collections::HashSet;
 use windows::Win32::Foundation::LPARAM;
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyNameTextW, GetKeyboardState};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, GetKeyNameTextW, GetKeyboardState, VK_DELETE, VK_DOWN, VK_END, VK_HOME, VK_INSERT, VK_LEFT, VK_NEXT, VK_PRIOR, VK_RIGHT, VK_UP};
 
 /// 程序入口函数
 /// 初始化日志系统、拦截驱动，然后进入事件循环处理键盘事件
@@ -22,9 +23,10 @@ fn main() -> Result<()> {
     init_log();
     log::info!("等待所有的键释放");
     // 动态等待直到所有按键释放
+    init_keyboard_state();  // Call once
     loop {
         if are_all_keys_released() {
-            log::info!("All keys released. Starting...");
+            log::info!("所有按键均已释放，程序开始");
             break;
         }
         // 短间隔轮询，减少 CPU 占用
@@ -64,7 +66,7 @@ fn main() -> Result<()> {
     // 事件处理主循环：持续监听并处理键盘事件
     let mut stroke_group = 0;
 
-        loop {
+    loop {
         // 等待键盘事件，超时时间为 1 毫秒（避免阻塞过久）
         let dev = intercept.wait_with_timeout(std::time::Duration::from_millis(1));
 
@@ -77,7 +79,12 @@ fn main() -> Result<()> {
             for i in 0..num_strokes {
                 let original_stroke = strokes[i]; // 复制当前事件（用于可能的修改）
                 stroke_group = stroke_group + 1;
-                log::info!("处理事件组 {} ,第 {}, 对应 {:?}" ,stroke_group, i+1,original_stroke);
+                log::info!(
+                    "处理事件组 {} ,第 {}, 对应 {:?}",
+                    stroke_group,
+                    i + 1,
+                    original_stroke
+                );
 
                 // 处理 CapsLock 键映射：将 CapsLock 替换为 Left Ctrl
                 if let Stroke::Keyboard {
@@ -316,7 +323,6 @@ fn deal_caps(
         }
     }
     (false, false)
-
 }
 
 fn init_log() {
@@ -388,31 +394,83 @@ fn e0_extra_key_state(state: KeyState) -> KeyState {
     new_state
 }
 /// 检查当前是否所有按键都处于释放状态
-fn are_all_keys_released() -> bool {
-    let mut key_states = [0u8; 256]; // 存储所有虚拟键的状态（0-255）
-    // 一次性获取所有键的状态
-    let success = unsafe { GetKeyboardState(&mut key_states) };
-    match success {
-        Ok(_) => {
-            // 只检查常见物理键盘按键的虚拟键码范围（0x08-0x7E）
-            for vk_code in 0x08..=0x7E {
-                let state = key_states[vk_code as usize];
-                // 每个字节的最高位（0x80）表示按键是否按下
-                if (state & 0x80) != 0 {
-                    log::warn!("检测到未释放的键: (VK_CODE: 0x{:02X})", vk_code);
-                    return false; // 检测到按下的键
-                }
-            }
+static CLEARED_WEIRD: std::sync::Once = std::sync::Once::new();
+
+/// Call this once early in your program (e.g. main() or init)
+pub fn init_keyboard_state() {
+    CLEARED_WEIRD.call_once(|| {
+        let weird = [VK_HOME, VK_END, VK_PRIOR, VK_NEXT, VK_INSERT, VK_DELETE,
+            VK_LEFT, VK_RIGHT, VK_UP, VK_DOWN];
+        for &vk in &weird {
+            unsafe { GetAsyncKeyState(i32::from(vk.0)); }
         }
-        Err(_) => {
-            // 系统调用失败时，默认等待（避免误判）
+    });
+}
+
+/// Ultra-fast version after init_keyboard_state() was called once
+pub fn are_all_keys_released() -> bool {
+    const WEIRD: [u16; 10] = [
+        0x21, 0x22, 0x23, 0x24, // Prior, Next, End, Home
+        0x25, 0x26, 0x27, 0x28, // Left, Up, Right, Down
+        0x2D, 0x2E,             // Insert, Delete
+    ];
+
+    for code in 1u16..=255u16 {
+        let state = unsafe { GetAsyncKeyState(i32::from(code)) };
+        let pressed = if WEIRD.contains(&code) {
+            (state & 1) != 0  // "was pressed" bit
+        } else {
+            state < 0         // normal "currently down"
+        };
+        if pressed {
             return false;
         }
     }
-    log::info!("所有按键均已释放");
-
     true
 }
+//  获取键位状态，false没有按下，true 按下
+pub fn is_key_down(vk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY) -> bool {
+    // These keys have bit 15 permanently set when up
+    const WEIRD_KEYS: [u16; 8] = [
+        VK_HOME.0, VK_END.0, VK_PRIOR.0, VK_NEXT.0,
+        VK_INSERT.0, VK_DELETE.0, VK_LEFT.0, VK_RIGHT.0,
+    ];
+
+    let code = vk.0;
+    unsafe {
+        let state = GetAsyncKeyState(i32::from(code));
+        if WEIRD_KEYS.contains(&code) {
+            // For these keys, bit 0 = was pressed since last call
+            // (you usually need to call it twice or clear it manually)
+            state & 1 != 0
+        } else {
+            state < 0                     // normal keys: bit 15 = currently down
+        }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use crate::is_key_down;
+    use windows::Win32::UI::Input::KeyboardAndMouse::*;
+
+    #[test]
+    fn test_key_states() {
+        // Give you a moment to release any keys
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        unsafe {
+            let home  = is_key_down(VK_HOME);
+            let shift = is_key_down(VK_LSHIFT);
+            let a     = is_key_down(VK_A);
+
+            println!("HOME: {home}   LSHIFT: {shift}   A: {a}");
+
+            // This will now PASS when Home is not pressed
+            assert!(!home, "Home key is reported as down but it should be up");
+        }
+    }
+}
+
 /// 通过虚拟键码获取键的名称（如 "A", "Left Ctrl", "Mouse Left" 等）
 fn get_key_name(vk_code: u16) -> String {
     // 构造 lParam 参数（低 16 位为虚拟键码，高 16 位为扩展键标志）
@@ -420,12 +478,7 @@ fn get_key_name(vk_code: u16) -> String {
     let mut buffer = [0u16; 256]; // 存储宽字符结果
 
     // 调用 Windows API 获取键名
-    let length = unsafe {
-        GetKeyNameTextW(
-            lparam.0 as i32,
-            &mut buffer
-        )
-    };
+    let length = unsafe { GetKeyNameTextW(lparam.0 as i32, &mut buffer) };
 
     if length > 0 {
         // 将宽字符串转换为 Rust 字符串
