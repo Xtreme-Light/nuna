@@ -13,7 +13,8 @@ use kanata_interception as ic;
 use kanata_interception::{Device, Interception, KeyState, ScanCode, Stroke};
 use log::LevelFilter;
 use simplelog::{ColorChoice, CombinedLogger, ConfigBuilder, TermLogger, TerminalMode};
-use windows::Win32::UI::Input::KeyboardAndMouse::GetKeyboardState;
+use windows::Win32::Foundation::LPARAM;
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyNameTextW, GetKeyboardState};
 
 /// 程序入口函数
 /// 初始化日志系统、拦截驱动，然后进入事件循环处理键盘事件
@@ -33,12 +34,12 @@ fn main() -> Result<()> {
     // 初始化 Interception 驱动
     // 若驱动未安装则提示用户安装方法
     let intercept = Interception::new().expect(
-        "interception driver 未安装，请下载安装。\n\
-        下载地址： https://github.com/oblitum/Interception \n\
-        安装步骤：\n\
-        1. 下载完成后，使用管理员权限打开命令行工具\n\
-        2. 在 interception 所在文件夹运行 install-interception /install 进行安装\n\
-        3. 使用 install-interception /uninstall 进行卸载\n\
+        "interception driver 未安装，请下载安装。\n
+        下载地址： https://github.com/oblitum/Interception \n
+        安装步骤：\n
+        1. 下载完成后，使用管理员权限打开命令行工具\n
+        2. 在 interception 所在文件夹运行 install-interception /install 进行安装\n
+        3. 使用 install-interception /uninstall 进行卸载\n
         注意：安装后需要重启电脑生效",
     );
 
@@ -61,7 +62,9 @@ fn main() -> Result<()> {
     // 是否使用CapsLock进行了组合按键使用
     let mut caps_combination = false;
     // 事件处理主循环：持续监听并处理键盘事件
-    loop {
+    let mut stroke_group = 0;
+
+        loop {
         // 等待键盘事件，超时时间为 1 毫秒（避免阻塞过久）
         let dev = intercept.wait_with_timeout(std::time::Duration::from_millis(1));
 
@@ -73,6 +76,8 @@ fn main() -> Result<()> {
             // 遍历处理每个接收到的事件
             for i in 0..num_strokes {
                 let original_stroke = strokes[i]; // 复制当前事件（用于可能的修改）
+                stroke_group = stroke_group + 1;
+                log::info!("处理事件组 {} ,第 {}, 对应 {:?}" ,stroke_group, i+1,original_stroke);
 
                 // 处理 CapsLock 键映射：将 CapsLock 替换为 Left Ctrl
                 if let Stroke::Keyboard {
@@ -85,39 +90,19 @@ fn main() -> Result<()> {
 
                     // 打印原始扫描码的十六进制值
                     log::debug!("原始扫描码: {:#x}", code as u16);
-                    
-                    if code == ScanCode::CapsLock {
-                        // 标记CapsLock状态，不发送原始事件(避免大小写切换)
-                        capslock_active = !state.contains(KeyState::UP);
-                        // 如果是释放事件，清空已处理按键集
-                        if !capslock_active {
-                            processed_keys.clear();
-                            if !caps_combination {
-                                // 如果没有使用capslock进行组合按键使用,在按键释放的时候发送Esc模拟按键
-                                intercept.send(
-                                    dev,
-                                    &[Stroke::Keyboard {
-                                        code: ScanCode::Esc,
-                                        state:KeyState::DOWN,
-                                        information,
-                                    }],
-                                );
-                                intercept.send(
-                                    dev,
-                                    &[Stroke::Keyboard {
-                                        code: ScanCode::Esc,
-                                        state:KeyState::UP,
-                                        information,
-                                    }],
-                                );
 
-                            }
-                            // capslock释放时重置caps_combination状态
-                            caps_combination = false;
-                        }
-
-                        continue; // 不发送原始CapsLock事件
-                    }
+                    let caps = deal_caps(
+                        &intercept,
+                        &mut processed_keys,
+                        caps_combination,
+                        dev,
+                        code,
+                        state,
+                        information,
+                    );
+                    // 激活对应的开关
+                    capslock_active = caps.0;
+                    caps_combination = caps.1;
 
                     // 当CapsLock激活时处理组合键
 
@@ -196,7 +181,7 @@ fn main() -> Result<()> {
                                     };
                                     intercept.send(dev, &[left_simulating]);
                                     continue;
-                                },
+                                }
                                 // ctrl + right
                                 ScanCode::F => {
                                     // 开始模拟ctrl键位
@@ -213,30 +198,52 @@ fn main() -> Result<()> {
                                     };
                                     intercept.send(dev, &[right_simulating]);
                                     continue;
-                                },
+                                }
                                 ScanCode::Z => {
                                     // ctrl + c  ,ctrl + v , ctrl + z ,ctrl + x
-                                    ctrl_simulating(ScanCode::Z, &intercept, dev, state, information);
+                                    ctrl_simulating(
+                                        ScanCode::Z,
+                                        &intercept,
+                                        dev,
+                                        state,
+                                        information,
+                                    );
                                     continue;
-                                },
+                                }
                                 ScanCode::X => {
                                     // ctrl + c  ,ctrl + v , ctrl + z ,ctrl + x
-                                    ctrl_simulating(ScanCode::X, &intercept, dev, state, information);
+                                    ctrl_simulating(
+                                        ScanCode::X,
+                                        &intercept,
+                                        dev,
+                                        state,
+                                        information,
+                                    );
                                     continue;
-                                },
+                                }
                                 ScanCode::C => {
                                     // ctrl + c  ,ctrl + v , ctrl + z ,ctrl + x
-                                    ctrl_simulating(ScanCode::C, &intercept, dev, state, information);
+                                    ctrl_simulating(
+                                        ScanCode::C,
+                                        &intercept,
+                                        dev,
+                                        state,
+                                        information,
+                                    );
                                     continue;
-                                },
+                                }
                                 ScanCode::V => {
                                     // ctrl + c  ,ctrl + v , ctrl + z ,ctrl + x
-                                    ctrl_simulating(ScanCode::V, &intercept, dev, state, information);
+                                    ctrl_simulating(
+                                        ScanCode::V,
+                                        &intercept,
+                                        dev,
+                                        state,
+                                        information,
+                                    );
                                     continue;
-                                },
-                                _ => {
-                                    original_stroke
                                 }
+                                _ => original_stroke,
                             };
                             intercept.send(dev, &[mapped_stroke]);
                             continue;
@@ -246,19 +253,70 @@ fn main() -> Result<()> {
 
                 // 记录事件信息到日志
                 // 尝试将事件转换为操作系统编码并显示，若失败则显示"未知的映射信息"
-                // log::debug!(
-                //     "拦截到键盘事件: {:?}，对应操作系统编码: {}",
-                //     original_stroke,
-                //     OsCode::try_from(original_stroke)
-                //         .map(|osc| osc.as_u16().to_string())
-                //         .unwrap_or_else(|_| "未知的映射信息".into()),
-                // );
+                log::debug!(
+                    "拦截到键盘事件: {:?}，对应操作系统编码: {}",
+                    original_stroke,
+                    OsCode::try_from(original_stroke)
+                        .map(|osc| osc.as_u16().to_string())
+                        .unwrap_or_else(|_| "未知的映射信息".into()),
+                );
 
                 // 将处理后的事件发送出去（若有映射则发送修改后的值）
                 intercept.send(dev, &[original_stroke]);
             }
         }
     }
+}
+/// 处理CapsLock按下时的事件, 返回元组第一个，表示CapsLock是否按下，第二个表示，是否是CapsLock 组合键，
+fn deal_caps(
+    intercept: &Interception,
+    processed_keys: &mut HashSet<ScanCode>,
+    caps_combination: bool,
+    dev: Device,
+    code: ScanCode,
+    state: KeyState,
+    information: u32,
+) -> (bool, bool) {
+    if code == ScanCode::CapsLock {
+        // 标记CapsLock状态，不发送原始事件(避免大小写切换)
+        let capslock_active = !state.contains(KeyState::UP);
+        // 新增：强制发送Left Ctrl释放事件
+        intercept.send(
+            dev,
+            &[Stroke::Keyboard {
+                code: ScanCode::LeftControl,
+                state: KeyState::UP,
+                information,
+            }],
+        );
+        // 如果是释放事件，清空已处理按键集
+
+        if !capslock_active {
+            processed_keys.clear();
+            if !caps_combination {
+                // 如果没有使用capslock进行组合按键使用,在按键释放的时候发送Esc模拟按键
+                intercept.send(
+                    dev,
+                    &[Stroke::Keyboard {
+                        code: ScanCode::Esc,
+                        state: KeyState::DOWN,
+                        information,
+                    }],
+                );
+                intercept.send(
+                    dev,
+                    &[Stroke::Keyboard {
+                        code: ScanCode::Esc,
+                        state: KeyState::UP,
+                        information,
+                    }],
+                );
+                return (true, true);
+            }
+        }
+    }
+    (false, false)
+
 }
 
 fn init_log() {
@@ -294,13 +352,27 @@ fn ctrl_simulating(
         state,
         information,
     };
-    intercept.send(dev, &[ctrl_simulating]);
     let c_simulating = Stroke::Keyboard {
         code: scan_code,
         state,
         information,
     };
+    intercept.send(dev, &[ctrl_simulating]);
     intercept.send(dev, &[c_simulating]);
+    // 关键修复：如果是释放事件，额外确认Ctrl已释放（防止事件丢失）
+    if state.contains(KeyState::UP) {
+        // 延迟1ms确保释放事件被系统捕获（应对系统事件处理延迟）
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        // 重复发送一次Ctrl释放事件，双重保险
+        intercept.send(
+            dev,
+            &[Stroke::Keyboard {
+                code: ScanCode::LeftControl,
+                state: KeyState::UP,
+                information,
+            }],
+        );
+    }
 }
 
 // 2. 处理E0扩展键序列（左方向键的核心逻辑）
@@ -322,20 +394,43 @@ fn are_all_keys_released() -> bool {
     let success = unsafe { GetKeyboardState(&mut key_states) };
     match success {
         Ok(_) => {
-            // 检查0x01到0xFE范围内的所有键
-            for vk_code in 0x01..=0xFE {
+            // 只检查常见物理键盘按键的虚拟键码范围（0x08-0x7E）
+            for vk_code in 0x08..=0x7E {
                 let state = key_states[vk_code as usize];
                 // 每个字节的最高位（0x80）表示按键是否按下
                 if (state & 0x80) != 0 {
+                    log::warn!("检测到未释放的键: (VK_CODE: 0x{:02X})", vk_code);
                     return false; // 检测到按下的键
                 }
             }
         }
         Err(_) => {
+            // 系统调用失败时，默认等待（避免误判）
             return false;
         }
     }
     log::info!("所有按键均已释放");
 
     true
+}
+/// 通过虚拟键码获取键的名称（如 "A", "Left Ctrl", "Mouse Left" 等）
+fn get_key_name(vk_code: u16) -> String {
+    // 构造 lParam 参数（低 16 位为虚拟键码，高 16 位为扩展键标志）
+    let lparam = LPARAM((vk_code as isize) << 16);
+    let mut buffer = [0u16; 256]; // 存储宽字符结果
+
+    // 调用 Windows API 获取键名
+    let length = unsafe {
+        GetKeyNameTextW(
+            lparam.0 as i32,
+            &mut buffer
+        )
+    };
+
+    if length > 0 {
+        // 将宽字符串转换为 Rust 字符串
+        String::from_utf16_lossy(&buffer[..length as usize])
+    } else {
+        format!("未知键 (VK_CODE: 0x{:02X})", vk_code)
+    }
 }

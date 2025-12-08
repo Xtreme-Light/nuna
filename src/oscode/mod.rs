@@ -735,6 +735,7 @@ impl TryFrom<Stroke> for OsCode {
 }
 
 impl OsCode {
+
     pub fn as_u16(self) -> u16 {
         match self {
             OsCode::KEY_0 => 0x30,
