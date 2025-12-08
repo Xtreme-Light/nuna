@@ -15,15 +15,14 @@ use log::LevelFilter;
 use simplelog::{ColorChoice, CombinedLogger, ConfigBuilder, TermLogger, TerminalMode};
 use std::collections::HashSet;
 use windows::Win32::Foundation::LPARAM;
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, GetKeyNameTextW, GetKeyboardState, VK_DELETE, VK_DOWN, VK_END, VK_HOME, VK_INSERT, VK_LEFT, VK_NEXT, VK_PRIOR, VK_RIGHT, VK_UP};
-
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, GetKeyNameTextW, VK_DELETE, VK_DOWN, VK_END, VK_HOME, VK_INSERT, VK_LCONTROL, VK_LEFT, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_NEXT, VK_PRIOR, VK_RCONTROL, VK_RIGHT, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_UP};
 /// 程序入口函数
 /// 初始化日志系统、拦截驱动，然后进入事件循环处理键盘事件
 fn main() -> Result<()> {
     init_log();
     log::info!("等待所有的键释放");
     // 动态等待直到所有按键释放
-    init_keyboard_state();  // Call once
+    init_keyboard_state(); // Call once
     loop {
         if are_all_keys_released() {
             log::info!("所有按键均已释放，程序开始");
@@ -59,6 +58,8 @@ fn main() -> Result<()> {
     log::info!("interception 驱动已加载，开始监听键盘事件...");
     // 用于跟踪CapsLock(已映射为虚拟键)的按下状态
     let mut capslock_active = false;
+    // NEW: Track if we expect Ctrl to be down (prevents ghosting)
+    let mut expected_ctrl_down = false;
     // 用于跟踪已处理的按键，避免重复发送
     let mut processed_keys = HashSet::new();
     // 是否使用CapsLock进行了组合按键使用
@@ -214,6 +215,7 @@ fn main() -> Result<()> {
                                         dev,
                                         state,
                                         information,
+                                        &mut expected_ctrl_down
                                     );
                                     continue;
                                 }
@@ -225,6 +227,7 @@ fn main() -> Result<()> {
                                         dev,
                                         state,
                                         information,
+                                        &mut expected_ctrl_down
                                     );
                                     continue;
                                 }
@@ -236,6 +239,7 @@ fn main() -> Result<()> {
                                         dev,
                                         state,
                                         information,
+                                        &mut expected_ctrl_down
                                     );
                                     continue;
                                 }
@@ -247,6 +251,7 @@ fn main() -> Result<()> {
                                         dev,
                                         state,
                                         information,
+                                        &mut expected_ctrl_down
                                     );
                                     continue;
                                 }
@@ -255,6 +260,18 @@ fn main() -> Result<()> {
                             intercept.send(dev, &[mapped_stroke]);
                             continue;
                         }
+                    }
+
+                    if expected_ctrl_down && !is_key_down(VK_LCONTROL) {
+                        // Mismatch: Force Ctrl UP to resync
+                        let ctrl_up = Stroke::Keyboard {
+                            code: ScanCode::LeftControl,
+                            state: KeyState::UP | KeyState::E0,  // E0 for extended Ctrl
+                            information: 0,  // Or original
+                        };
+                        intercept.send(dev, &[ctrl_up]);
+                        expected_ctrl_down = false;
+                        log::warn!("Resynced stuck Ctrl UP");
                     }
                 }
 
@@ -273,6 +290,9 @@ fn main() -> Result<()> {
             }
         }
     }
+
+
+
 }
 /// 处理CapsLock按下时的事件, 返回元组第一个，表示CapsLock是否按下，第二个表示，是否是CapsLock 组合键，
 fn deal_caps(
@@ -285,44 +305,32 @@ fn deal_caps(
     information: u32,
 ) -> (bool, bool) {
     if code == ScanCode::CapsLock {
-        // 标记CapsLock状态，不发送原始事件(避免大小写切换)
-        let capslock_active = !state.contains(KeyState::UP);
-        // 新增：强制发送Left Ctrl释放事件
-        intercept.send(
-            dev,
-            &[Stroke::Keyboard {
-                code: ScanCode::LeftControl,
-                state: KeyState::UP,
-                information,
-            }],
-        );
-        // 如果是释放事件，清空已处理按键集
+        let capslock_active = !state.contains(KeyState::UP);  // DOWN = true
 
-        if !capslock_active {
+        // REMOVED: No always-forced Ctrl UP—causes races. Handle in tracking below.
+
+        if !capslock_active {  // Release
             processed_keys.clear();
             if !caps_combination {
-                // 如果没有使用capslock进行组合按键使用,在按键释放的时候发送Esc模拟按键
-                intercept.send(
-                    dev,
-                    &[Stroke::Keyboard {
-                        code: ScanCode::Esc,
-                        state: KeyState::DOWN,
-                        information,
-                    }],
-                );
-                intercept.send(
-                    dev,
-                    &[Stroke::Keyboard {
-                        code: ScanCode::Esc,
-                        state: KeyState::UP,
-                        information,
-                    }],
-                );
-                return (true, true);
+                // Batch Esc DOWN + UP in ONE send for atomicity
+                let esc_down = Stroke::Keyboard {
+                    code: ScanCode::Esc,
+                    state: KeyState::DOWN,
+                    information,
+                };
+                let esc_up = Stroke::Keyboard {
+                    code: ScanCode::Esc,
+                    state: KeyState::UP,
+                    information,
+                };
+                intercept.send(dev, &[esc_down, esc_up]);
+                return (false, false);  // Deactivate
             }
         }
+        (capslock_active, caps_combination)
+    } else {
+        (false, false)
     }
-    (false, false)
 }
 
 fn init_log() {
@@ -351,33 +359,39 @@ fn ctrl_simulating(
     dev: Device,
     state: KeyState,
     information: u32,
+    expected_ctrl_down: &mut bool,
 ) {
-    // 开始模拟ctrl键位
-    let ctrl_simulating = Stroke::Keyboard {
-        code: ScanCode::LeftControl,
-        state,
-        information,
-    };
-    let c_simulating = Stroke::Keyboard {
-        code: scan_code,
-        state,
-        information,
-    };
-    intercept.send(dev, &[ctrl_simulating]);
-    intercept.send(dev, &[c_simulating]);
-    // 关键修复：如果是释放事件，额外确认Ctrl已释放（防止事件丢失）
-    if state.contains(KeyState::UP) {
-        // 延迟1ms确保释放事件被系统捕获（应对系统事件处理延迟）
-        std::thread::sleep(std::time::Duration::from_millis(1));
-        // 重复发送一次Ctrl释放事件，双重保险
-        intercept.send(
-            dev,
-            &[Stroke::Keyboard {
-                code: ScanCode::LeftControl,
-                state: KeyState::UP,
-                information,
-            }],
-        );
+    if state.contains(KeyState::DOWN) {
+        // Batch: Ctrl DOWN + Key DOWN
+        let ctrl_down = Stroke::Keyboard {
+            code: ScanCode::LeftControl,
+            state: KeyState::DOWN | KeyState::E0,  // E0 required for Left Ctrl
+            information,
+        };
+        let key_down = Stroke::Keyboard {
+            code: scan_code,
+            state: KeyState::DOWN,
+            information,
+        };
+        intercept.send(dev, &[ctrl_down, key_down]);
+        *expected_ctrl_down = true;
+    } else {
+        // Batch: Key UP + Ctrl UP (reverse order to match release)
+        let key_up = Stroke::Keyboard {
+            code: scan_code,
+            state: KeyState::UP,
+            information,
+        };
+        let ctrl_up = Stroke::Keyboard {
+            code: ScanCode::LeftControl,
+            state: KeyState::UP | KeyState::E0,
+            information,
+        };
+        intercept.send(dev, &[key_up, ctrl_up]);
+        *expected_ctrl_down = false;
+
+        // Optional: Short sleep for high-load systems
+        // std::thread::sleep(std::time::Duration::from_millis(1));
     }
 }
 
@@ -396,31 +410,72 @@ fn e0_extra_key_state(state: KeyState) -> KeyState {
 /// 检查当前是否所有按键都处于释放状态
 static CLEARED_WEIRD: std::sync::Once = std::sync::Once::new();
 
-/// Call this once early in your program (e.g. main() or init)
 pub fn init_keyboard_state() {
     CLEARED_WEIRD.call_once(|| {
-        let weird = [VK_HOME, VK_END, VK_PRIOR, VK_NEXT, VK_INSERT, VK_DELETE,
-            VK_LEFT, VK_RIGHT, VK_UP, VK_DOWN];
+        // Existing weird keys...
+        let weird = [
+            VK_HOME,
+            VK_END,
+            VK_PRIOR,
+            VK_NEXT,
+            VK_INSERT,
+            VK_DELETE,
+            VK_LEFT,
+            VK_RIGHT,
+            VK_UP,
+            VK_DOWN,
+            // NEW: Flush ALL modifiers to prevent ghosting
+            VK_LCONTROL,
+            VK_RCONTROL,
+            VK_LSHIFT,
+            VK_RSHIFT,
+            VK_LMENU,
+            VK_RMENU, // Alt
+            VK_LWIN,
+            VK_RWIN, // Win
+        ];
         for &vk in &weird {
-            unsafe { GetAsyncKeyState(i32::from(vk.0)); }
+            unsafe {
+                windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(i32::from(vk.0));
+            }
         }
+        // Extra: Force-send UP for all modifiers (safe, as they're likely up)
+        // You'll need access to Interception here—move this to main() post-init if preferred
     });
 }
 
 /// Ultra-fast version after init_keyboard_state() was called once
 pub fn are_all_keys_released() -> bool {
-    const WEIRD: [u16; 10] = [
-        0x21, 0x22, 0x23, 0x24, // Prior, Next, End, Home
-        0x25, 0x26, 0x27, 0x28, // Left, Up, Right, Down
-        0x2D, 0x2E,             // Insert, Delete
+    const WEIRD: [u16; 18] = [
+        0x21,
+        0x22,
+        0x23,
+        0x24, // Prior, Next, End, Home
+        0x25,
+        0x26,
+        0x27,
+        0x28, // Left, Up, Right, Down
+        0x2D,
+        0x2E,
+        // NEW: Modifiers (treat as "weird" to avoid false positives)
+        VK_LCONTROL.0,
+        VK_RCONTROL.0,
+        VK_LSHIFT.0,
+        VK_RSHIFT.0,
+        VK_LMENU.0,
+        VK_RMENU.0,
+        VK_LWIN.0,
+        VK_RWIN.0, // Insert, Delete
     ];
 
     for code in 1u16..=255u16 {
-        let state = unsafe { GetAsyncKeyState(i32::from(code)) };
+        let state = unsafe {
+            windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(i32::from(code))
+        };
         let pressed = if WEIRD.contains(&code) {
-            (state & 1) != 0  // "was pressed" bit
+            (state & 1) != 0 // "was pressed" bit
         } else {
-            state < 0         // normal "currently down"
+            state < 0 // normal "currently down"
         };
         if pressed {
             return false;
@@ -432,8 +487,14 @@ pub fn are_all_keys_released() -> bool {
 pub fn is_key_down(vk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY) -> bool {
     // These keys have bit 15 permanently set when up
     const WEIRD_KEYS: [u16; 8] = [
-        VK_HOME.0, VK_END.0, VK_PRIOR.0, VK_NEXT.0,
-        VK_INSERT.0, VK_DELETE.0, VK_LEFT.0, VK_RIGHT.0,
+        VK_HOME.0,
+        VK_END.0,
+        VK_PRIOR.0,
+        VK_NEXT.0,
+        VK_INSERT.0,
+        VK_DELETE.0,
+        VK_LEFT.0,
+        VK_RIGHT.0,
     ];
 
     let code = vk.0;
@@ -444,7 +505,7 @@ pub fn is_key_down(vk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY)
             // (you usually need to call it twice or clear it manually)
             state & 1 != 0
         } else {
-            state < 0                     // normal keys: bit 15 = currently down
+            state < 0 // normal keys: bit 15 = currently down
         }
     }
 }
@@ -459,9 +520,9 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(200));
 
         unsafe {
-            let home  = is_key_down(VK_HOME);
+            let home = is_key_down(VK_HOME);
             let shift = is_key_down(VK_LSHIFT);
-            let a     = is_key_down(VK_A);
+            let a = is_key_down(VK_A);
 
             println!("HOME: {home}   LSHIFT: {shift}   A: {a}");
 
