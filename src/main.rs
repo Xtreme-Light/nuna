@@ -15,7 +15,11 @@ use log::LevelFilter;
 use simplelog::{ColorChoice, CombinedLogger, ConfigBuilder, TermLogger, TerminalMode};
 use std::collections::HashSet;
 use windows::Win32::Foundation::LPARAM;
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, GetKeyNameTextW, VK_DELETE, VK_DOWN, VK_END, VK_HOME, VK_INSERT, VK_LCONTROL, VK_LEFT, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_NEXT, VK_PRIOR, VK_RCONTROL, VK_RIGHT, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_UP};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetAsyncKeyState, GetKeyNameTextW, VK_DELETE, VK_DOWN, VK_END, VK_HOME, VK_INSERT, VK_LCONTROL,
+    VK_LEFT, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_NEXT, VK_PRIOR, VK_RCONTROL, VK_RIGHT, VK_RMENU,
+    VK_RSHIFT, VK_RWIN, VK_UP,
+};
 /// 程序入口函数
 /// 初始化日志系统、拦截驱动，然后进入事件循环处理键盘事件
 fn main() -> Result<()> {
@@ -57,15 +61,9 @@ fn main() -> Result<()> {
 
     log::info!("interception 驱动已加载，开始监听键盘事件...");
     // 用于跟踪CapsLock(已映射为虚拟键)的按下状态
-    let mut capslock_active = false;
+    let mut caps_down = false;
     // NEW: Track if we expect Ctrl to be down (prevents ghosting)
     let mut expected_ctrl_down = false;
-    // 用于跟踪已处理的按键，避免重复发送
-    let mut processed_keys = HashSet::new();
-    // 是否使用CapsLock进行了组合按键使用
-    let mut caps_combination = false;
-    // 事件处理主循环：持续监听并处理键盘事件
-    let mut stroke_group = 0;
 
     loop {
         // 等待键盘事件，超时时间为 1 毫秒（避免阻塞过久）
@@ -79,14 +77,6 @@ fn main() -> Result<()> {
             // 遍历处理每个接收到的事件
             for i in 0..num_strokes {
                 let original_stroke = strokes[i]; // 复制当前事件（用于可能的修改）
-                stroke_group = stroke_group + 1;
-                log::info!(
-                    "处理事件组 {} ,第 {}, 对应 {:?}",
-                    stroke_group,
-                    i + 1,
-                    original_stroke
-                );
-
                 // 处理 CapsLock 键映射：将 CapsLock 替换为 Left Ctrl
                 if let Stroke::Keyboard {
                     code,
@@ -94,242 +84,194 @@ fn main() -> Result<()> {
                     information,
                 } = original_stroke
                 {
-                    // 1. 先处理CapsLock本身：禁用原生大小写切换，仅标记激活状态
-
-                    // 打印原始扫描码的十六进制值
-                    log::debug!("原始扫描码: {:#x}", code as u16);
-
-                    let caps = deal_caps(
-                        &intercept,
-                        &mut processed_keys,
-                        caps_combination,
-                        dev,
-                        code,
-                        state,
-                        information,
-                    );
-                    // 激活对应的开关
-                    capslock_active = caps.0;
-                    caps_combination = caps.1;
-
-                    // 当CapsLock激活时处理组合键
-
-                    if capslock_active {
-                        // 确认开始使用组合按键
-                        caps_combination = true;
-                        // 检查是否已处理过该按键，避免重复处理
-                        if processed_keys.contains(&code) && state.contains(KeyState::UP) {
-                            processed_keys.remove(&code);
-                        } else if !processed_keys.contains(&code) {
-                            processed_keys.insert(code);
-                            // 根据不同按键进行映射
-
-                            let mapped_stroke = match code {
-                                // Ctrl +Space = Backspace
-                                ScanCode::Space => Stroke::Keyboard {
-                                    code: ScanCode::Backspace,
+                    // 如果是按下了Capslock键位，则激活标识位
+                    if code == ScanCode::CapsLock {
+                        caps_down = !state.contains(KeyState::UP); // DOWN = true
+                        continue;
+                    }
+                    //  下一个键位过来的时候，此时caps是否被激活了，被激活了，则触发组合键的功能
+                    if caps_down {
+                        let mapped_stroke = match code {
+                            // Ctrl +Space = Backspace
+                            ScanCode::Space => Stroke::Keyboard {
+                                code: ScanCode::Backspace,
+                                state,
+                                information,
+                            },
+                            // Ctrl +D = Del
+                            ScanCode::D => Stroke::Keyboard {
+                                code: ScanCode::NumpadPeriod,
+                                state: e0_extra_key_state(state),
+                                information,
+                            },
+                            // Ctrl +A = Home
+                            ScanCode::A => Stroke::Keyboard {
+                                code: ScanCode::Numpad7,
+                                state: e0_extra_key_state(state),
+                                information,
+                            },
+                            // Ctrl + E = End
+                            ScanCode::E => Stroke::Keyboard {
+                                code: ScanCode::Numpad1,
+                                state: e0_extra_key_state(state),
+                                information,
+                            },
+                            // 方向左键
+                            ScanCode::H => Stroke::Keyboard {
+                                code: ScanCode::Numpad4,
+                                state: e0_extra_key_state(state),
+                                information,
+                            },
+                            // 方向右键
+                            ScanCode::L => Stroke::Keyboard {
+                                code: ScanCode::Numpad6,
+                                state: e0_extra_key_state(state),
+                                information,
+                            },
+                            // 方向上键
+                            ScanCode::J => Stroke::Keyboard {
+                                code: ScanCode::Numpad8,
+                                state: e0_extra_key_state(state),
+                                information,
+                            },
+                            // 方向下键
+                            ScanCode::K => Stroke::Keyboard {
+                                code: ScanCode::Numpad2,
+                                state: e0_extra_key_state(state),
+                                information,
+                            },
+                            // ctrl + left
+                            ScanCode::B => {
+                                // 开始模拟ctrl键位
+                                let ctrl_simulating = Stroke::Keyboard {
+                                    code: ScanCode::LeftControl,
                                     state,
                                     information,
-                                },
-                                // Ctrl +D = Del
-                                ScanCode::D => Stroke::Keyboard {
-                                    code: ScanCode::NumpadPeriod,
-                                    state: e0_extra_key_state(state),
-                                    information,
-                                },
-                                // Ctrl +A = Home
-                                ScanCode::A => Stroke::Keyboard {
-                                    code: ScanCode::Numpad7,
-                                    state: e0_extra_key_state(state),
-                                    information,
-                                },
-                                // Ctrl + E = End
-                                ScanCode::E => Stroke::Keyboard {
-                                    code: ScanCode::Numpad1,
-                                    state: e0_extra_key_state(state),
-                                    information,
-                                },
-                                // 方向左键
-                                ScanCode::H => Stroke::Keyboard {
+                                };
+                                let left_simulating = Stroke::Keyboard {
                                     code: ScanCode::Numpad4,
                                     state: e0_extra_key_state(state),
                                     information,
-                                },
-                                // 方向右键
-                                ScanCode::L => Stroke::Keyboard {
+                                };
+                                intercept.send(dev, &[ctrl_simulating,left_simulating]);
+                                continue;
+                            }
+                            // ctrl + right
+                            ScanCode::F => {
+                                // 开始模拟ctrl键位
+                                let ctrl_simulating = Stroke::Keyboard {
+                                    code: ScanCode::LeftControl,
+                                    state,
+                                    information,
+                                };
+                                let right_simulating = Stroke::Keyboard {
                                     code: ScanCode::Numpad6,
                                     state: e0_extra_key_state(state),
                                     information,
-                                },
-                                // 方向上键
-                                ScanCode::J => Stroke::Keyboard {
-                                    code: ScanCode::Numpad8,
-                                    state: e0_extra_key_state(state),
+                                };
+                                intercept.send(dev, &[ctrl_simulating,right_simulating]);
+                                continue;
+                            }
+                            ScanCode::Z => {
+                                // ctrl + c  ,ctrl + v , ctrl + z ,ctrl + x
+                                ctrl_simulating(
+                                    ScanCode::Z,
+                                    &intercept,
+                                    dev,
+                                    state,
                                     information,
-                                },
-                                // 方向下键
-                                ScanCode::K => Stroke::Keyboard {
-                                    code: ScanCode::Numpad2,
-                                    state: e0_extra_key_state(state),
+                                    &mut expected_ctrl_down,
+                                );
+                                continue;
+                            }
+                            ScanCode::X => {
+                                // ctrl + c  ,ctrl + v , ctrl + z ,ctrl + x
+                                ctrl_simulating(
+                                    ScanCode::X,
+                                    &intercept,
+                                    dev,
+                                    state,
                                     information,
-                                },
-                                // ctrl + left
-                                ScanCode::B => {
-                                    // 开始模拟ctrl键位
-                                    let ctrl_simulating = Stroke::Keyboard {
-                                        code: ScanCode::LeftControl,
-                                        state,
-                                        information,
-                                    };
-                                    intercept.send(dev, &[ctrl_simulating]);
-                                    let left_simulating = Stroke::Keyboard {
-                                        code: ScanCode::Numpad4,
-                                        state: e0_extra_key_state(state),
-                                        information,
-                                    };
-                                    intercept.send(dev, &[left_simulating]);
-                                    continue;
-                                }
-                                // ctrl + right
-                                ScanCode::F => {
-                                    // 开始模拟ctrl键位
-                                    let ctrl_simulating = Stroke::Keyboard {
-                                        code: ScanCode::LeftControl,
-                                        state,
-                                        information,
-                                    };
-                                    intercept.send(dev, &[ctrl_simulating]);
-                                    let right_simulating = Stroke::Keyboard {
-                                        code: ScanCode::Numpad6,
-                                        state: e0_extra_key_state(state),
-                                        information,
-                                    };
-                                    intercept.send(dev, &[right_simulating]);
-                                    continue;
-                                }
-                                ScanCode::Z => {
-                                    // ctrl + c  ,ctrl + v , ctrl + z ,ctrl + x
-                                    ctrl_simulating(
-                                        ScanCode::Z,
-                                        &intercept,
-                                        dev,
-                                        state,
-                                        information,
-                                        &mut expected_ctrl_down
-                                    );
-                                    continue;
-                                }
-                                ScanCode::X => {
-                                    // ctrl + c  ,ctrl + v , ctrl + z ,ctrl + x
-                                    ctrl_simulating(
-                                        ScanCode::X,
-                                        &intercept,
-                                        dev,
-                                        state,
-                                        information,
-                                        &mut expected_ctrl_down
-                                    );
-                                    continue;
-                                }
-                                ScanCode::C => {
-                                    // ctrl + c  ,ctrl + v , ctrl + z ,ctrl + x
-                                    ctrl_simulating(
-                                        ScanCode::C,
-                                        &intercept,
-                                        dev,
-                                        state,
-                                        information,
-                                        &mut expected_ctrl_down
-                                    );
-                                    continue;
-                                }
-                                ScanCode::V => {
-                                    // ctrl + c  ,ctrl + v , ctrl + z ,ctrl + x
-                                    ctrl_simulating(
-                                        ScanCode::V,
-                                        &intercept,
-                                        dev,
-                                        state,
-                                        information,
-                                        &mut expected_ctrl_down
-                                    );
-                                    continue;
-                                }
-                                _ => original_stroke,
-                            };
-                            intercept.send(dev, &[mapped_stroke]);
-                            continue;
-                        }
-                    }
-
-                    if expected_ctrl_down && !is_key_down(VK_LCONTROL) {
-                        // Mismatch: Force Ctrl UP to resync
-                        let ctrl_up = Stroke::Keyboard {
-                            code: ScanCode::LeftControl,
-                            state: KeyState::UP | KeyState::E0,  // E0 for extended Ctrl
-                            information: 0,  // Or original
+                                    &mut expected_ctrl_down,
+                                );
+                                continue;
+                            }
+                            ScanCode::C => {
+                                // ctrl + c  ,ctrl + v , ctrl + z ,ctrl + x
+                                ctrl_simulating(
+                                    ScanCode::C,
+                                    &intercept,
+                                    dev,
+                                    state,
+                                    information,
+                                    &mut expected_ctrl_down,
+                                );
+                                continue;
+                            }
+                            ScanCode::V => {
+                                // ctrl + c  ,ctrl + v , ctrl + z ,ctrl + x
+                                ctrl_simulating(
+                                    ScanCode::V,
+                                    &intercept,
+                                    dev,
+                                    state,
+                                    information,
+                                    &mut expected_ctrl_down,
+                                );
+                                continue;
+                            }
+                            ScanCode::W => {
+                                // ctrl + c  ,ctrl + v , ctrl + z ,ctrl + x
+                                ctrl_simulating(
+                                    ScanCode::W,
+                                    &intercept,
+                                    dev,
+                                    state,
+                                    information,
+                                    &mut expected_ctrl_down,
+                                );
+                                continue;
+                            }
+                            ScanCode::Q => {
+                                // caps + q = ctl + a
+                                ctrl_simulating(
+                                    ScanCode::A,
+                                    &intercept,
+                                    dev,
+                                    state,
+                                    information,
+                                    &mut expected_ctrl_down,
+                                );
+                                continue;
+                            }
+                            _ => original_stroke,
                         };
-                        intercept.send(dev, &[ctrl_up]);
-                        expected_ctrl_down = false;
-                        log::warn!("Resynced stuck Ctrl UP");
+
+                        log::info!(
+                            "拦截到键盘事件: {:?}，映射成为了： {:?}",
+                            original_stroke,
+                            mapped_stroke,
+                        );
+                        intercept.send(dev, &[mapped_stroke]);
+                        continue;
                     }
                 }
 
-                // 记录事件信息到日志
-                // 尝试将事件转换为操作系统编码并显示，若失败则显示"未知的映射信息"
-                log::debug!(
-                    "拦截到键盘事件: {:?}，对应操作系统编码: {}",
-                    original_stroke,
-                    OsCode::try_from(original_stroke)
-                        .map(|osc| osc.as_u16().to_string())
-                        .unwrap_or_else(|_| "未知的映射信息".into()),
-                );
-
+                if expected_ctrl_down && !is_key_down(VK_LCONTROL) {
+                    // Mismatch: Force Ctrl UP to resync
+                    let ctrl_up = Stroke::Keyboard {
+                        code: ScanCode::LeftControl,
+                        state: KeyState::UP | KeyState::E0, // E0 for extended Ctrl
+                        information: 0,                     // Or original
+                    };
+                    intercept.send(dev, &[ctrl_up]);
+                    expected_ctrl_down = false;
+                    log::warn!("Resynced stuck Ctrl UP");
+                }
                 // 将处理后的事件发送出去（若有映射则发送修改后的值）
                 intercept.send(dev, &[original_stroke]);
             }
         }
-    }
-
-
-
-}
-/// 处理CapsLock按下时的事件, 返回元组第一个，表示CapsLock是否按下，第二个表示，是否是CapsLock 组合键，
-fn deal_caps(
-    intercept: &Interception,
-    processed_keys: &mut HashSet<ScanCode>,
-    caps_combination: bool,
-    dev: Device,
-    code: ScanCode,
-    state: KeyState,
-    information: u32,
-) -> (bool, bool) {
-    if code == ScanCode::CapsLock {
-        let capslock_active = !state.contains(KeyState::UP);  // DOWN = true
-
-        // REMOVED: No always-forced Ctrl UP—causes races. Handle in tracking below.
-
-        if !capslock_active {  // Release
-            processed_keys.clear();
-            if !caps_combination {
-                // Batch Esc DOWN + UP in ONE send for atomicity
-                let esc_down = Stroke::Keyboard {
-                    code: ScanCode::Esc,
-                    state: KeyState::DOWN,
-                    information,
-                };
-                let esc_up = Stroke::Keyboard {
-                    code: ScanCode::Esc,
-                    state: KeyState::UP,
-                    information,
-                };
-                intercept.send(dev, &[esc_down, esc_up]);
-                return (false, false);  // Deactivate
-            }
-        }
-        (capslock_active, caps_combination)
-    } else {
-        (false, false)
     }
 }
 
@@ -361,11 +303,11 @@ fn ctrl_simulating(
     information: u32,
     expected_ctrl_down: &mut bool,
 ) {
-    if state.contains(KeyState::DOWN) {
+    if !state.contains(KeyState::UP) {
         // Batch: Ctrl DOWN + Key DOWN
         let ctrl_down = Stroke::Keyboard {
             code: ScanCode::LeftControl,
-            state: KeyState::DOWN | KeyState::E0,  // E0 required for Left Ctrl
+            state: KeyState::DOWN | KeyState::E0, // E0 required for Left Ctrl
             information,
         };
         let key_down = Stroke::Keyboard {
@@ -373,6 +315,12 @@ fn ctrl_simulating(
             state: KeyState::DOWN,
             information,
         };
+        log::info!(
+            "拦截到键盘按下事件: {:?}，映射成为了： {:?} {:?}",
+            scan_code,
+            ctrl_down,
+            key_down
+        );
         intercept.send(dev, &[ctrl_down, key_down]);
         *expected_ctrl_down = true;
     } else {
@@ -388,6 +336,12 @@ fn ctrl_simulating(
             information,
         };
         intercept.send(dev, &[key_up, ctrl_up]);
+        log::info!(
+            "拦截到键盘释放事件: {:?}，映射成为了： {:?} {:?}",
+            scan_code,
+            key_up,
+            ctrl_up
+        );
         *expected_ctrl_down = false;
 
         // Optional: Short sleep for high-load systems
