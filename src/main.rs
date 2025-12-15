@@ -1,12 +1,16 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 //! 该程序使用 kanata_interception 库拦截键盘事件，实现将 CapsLock 键映射为 Left Ctrl 键的功能，
 //! 并通过日志记录拦截到的键盘事件信息。
 
 // 导入模块
 mod keys;
 mod oscode;
+mod tray;
 
 // 导入所需的外部库和模块
+use crate::tray::init_tray;
 use anyhow::Result;
+use crossbeam_channel::{Receiver, unbounded};
 use kanata_interception as ic;
 use kanata_interception::{Device, Interception, KeyState, ScanCode, Stroke};
 use log::LevelFilter;
@@ -17,10 +21,35 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_LEFT, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_NEXT, VK_PRIOR, VK_RCONTROL, VK_RIGHT, VK_RMENU,
     VK_RSHIFT, VK_RWIN, VK_UP,
 };
+
 /// 程序入口函数
 /// 初始化日志系统、拦截驱动，然后进入事件循环处理键盘事件
 fn main() -> Result<()> {
     init_log();
+
+    log::info!("程序启动中...");
+
+    // 创建退出信号通道
+    let (exit_tx, exit_rx) = unbounded();
+
+    // 启动键盘拦截线程
+    std::thread::spawn(move || {
+        if let Err(e) = keyboard_interceptor(exit_rx) {
+            log::error!("键盘拦截线程出错: {}", e);
+        }
+    });
+
+    // 初始化系统托盘
+    let _tray_icon = init_tray(exit_tx)?;
+    log::info!("系统托盘初始化完成");
+
+
+
+    Ok(())
+
+}
+
+fn keyboard_interceptor(exit_rx: Receiver<()>) -> Result<()> {
     log::info!("等待所有的键释放");
     // 动态等待直到所有按键释放
     init_keyboard_state(); // Call once
@@ -63,6 +92,11 @@ fn main() -> Result<()> {
     let mut expected_ctrl_down = false;
 
     loop {
+        // 检查退出信号
+        if exit_rx.try_recv().is_ok() {
+            log::info!("收到退出信号，停止键盘拦截");
+            return Ok(());
+        }
         // 等待键盘事件，超时时间为 1 毫秒（避免阻塞过久）
         let dev = intercept.wait_with_timeout(std::time::Duration::from_millis(1));
 
@@ -150,7 +184,7 @@ fn main() -> Result<()> {
                                     state: e0_extra_key_state(state),
                                     information,
                                 };
-                                intercept.send(dev, &[ctrl_simulating,left_simulating]);
+                                intercept.send(dev, &[ctrl_simulating, left_simulating]);
                                 continue;
                             }
                             // ctrl + right
@@ -166,7 +200,7 @@ fn main() -> Result<()> {
                                     state: e0_extra_key_state(state),
                                     information,
                                 };
-                                intercept.send(dev, &[ctrl_simulating,right_simulating]);
+                                intercept.send(dev, &[ctrl_simulating, right_simulating]);
                                 continue;
                             }
                             ScanCode::Z => {
@@ -283,7 +317,6 @@ fn main() -> Result<()> {
         }
     }
 }
-
 fn init_log() {
     // 配置日志系统
     // 尝试将日志时间设置为本地时间，若失败则输出警告
