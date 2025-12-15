@@ -6,14 +6,11 @@ mod keys;
 mod oscode;
 
 // 导入所需的外部库和模块
-use crate::keys::all_scan_codes;
-use crate::oscode::OsCode;
 use anyhow::Result;
 use kanata_interception as ic;
 use kanata_interception::{Device, Interception, KeyState, ScanCode, Stroke};
 use log::LevelFilter;
 use simplelog::{ColorChoice, CombinedLogger, ConfigBuilder, TermLogger, TerminalMode};
-use std::collections::HashSet;
 use windows::Win32::Foundation::LPARAM;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, GetKeyNameTextW, VK_DELETE, VK_DOWN, VK_END, VK_HOME, VK_INSERT, VK_LCONTROL,
@@ -499,6 +496,7 @@ mod tests {
 }
 
 /// 通过虚拟键码获取键的名称（如 "A", "Left Ctrl", "Mouse Left" 等）
+#[allow(unused)]
 fn get_key_name(vk_code: u16) -> String {
     // 构造 lParam 参数（低 16 位为虚拟键码，高 16 位为扩展键标志）
     let lparam = LPARAM((vk_code as isize) << 16);
