@@ -15,6 +15,7 @@ use kanata_interception as ic;
 use kanata_interception::{Device, Interception, KeyState, ScanCode, Stroke};
 use log::LevelFilter;
 use simplelog::{ColorChoice, CombinedLogger, ConfigBuilder, TermLogger, TerminalMode};
+use single_instance::SingleInstance;
 use windows::Win32::Foundation::LPARAM;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, GetKeyNameTextW, VK_DELETE, VK_DOWN, VK_END, VK_HOME, VK_INSERT, VK_LCONTROL,
@@ -25,6 +26,11 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 /// 程序入口函数
 /// 初始化日志系统、拦截驱动，然后进入事件循环处理键盘事件
 fn main() -> Result<()> {
+    let instance = SingleInstance::new("nuna.exe")?;
+    if !instance.is_single() {
+        return Err(anyhow::anyhow!("已有单例正在执行，请勿重复启动"));
+    };
+
     init_log();
 
     log::info!("程序启动中...");
@@ -43,10 +49,7 @@ fn main() -> Result<()> {
     let _tray_icon = init_tray(exit_tx)?;
     log::info!("系统托盘初始化完成");
 
-
-
     Ok(())
-
 }
 
 fn keyboard_interceptor(exit_rx: Receiver<()>) -> Result<()> {
