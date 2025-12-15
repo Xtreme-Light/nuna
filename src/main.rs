@@ -244,14 +244,26 @@ fn main() -> Result<()> {
                                 );
                                 continue;
                             }
+                            ScanCode::S => {
+                                // caps + s = ctl + s
+                                ctrl_simulating(
+                                    ScanCode::S,
+                                    &intercept,
+                                    dev,
+                                    state,
+                                    information,
+                                    &mut expected_ctrl_down,
+                                );
+                                continue;
+                            }
                             _ => original_stroke,
                         };
 
-                        log::info!(
-                            "拦截到键盘事件: {:?}，映射成为了： {:?}",
-                            original_stroke,
-                            mapped_stroke,
-                        );
+                        // log::info!(
+                        //     "拦截到键盘事件: {:?}，映射成为了： {:?}",
+                        //     original_stroke,
+                        //     mapped_stroke,
+                        // );
                         intercept.send(dev, &[mapped_stroke]);
                         continue;
                     }
@@ -315,12 +327,12 @@ fn ctrl_simulating(
             state: KeyState::DOWN,
             information,
         };
-        log::info!(
-            "拦截到键盘按下事件: {:?}，映射成为了： {:?} {:?}",
-            scan_code,
-            ctrl_down,
-            key_down
-        );
+        // log::info!(
+        //     "拦截到键盘按下事件: {:?}，映射成为了： {:?} {:?}",
+        //     scan_code,
+        //     ctrl_down,
+        //     key_down
+        // );
         intercept.send(dev, &[ctrl_down, key_down]);
         *expected_ctrl_down = true;
     } else {
@@ -336,12 +348,12 @@ fn ctrl_simulating(
             information,
         };
         intercept.send(dev, &[key_up, ctrl_up]);
-        log::info!(
-            "拦截到键盘释放事件: {:?}，映射成为了： {:?} {:?}",
-            scan_code,
-            key_up,
-            ctrl_up
-        );
+        // log::info!(
+        //     "拦截到键盘释放事件: {:?}，映射成为了： {:?} {:?}",
+        //     scan_code,
+        //     key_up,
+        //     ctrl_up
+        // );
         *expected_ctrl_down = false;
 
         // Optional: Short sleep for high-load systems
