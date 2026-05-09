@@ -120,7 +120,18 @@ fn keyboard_interceptor(exit_rx: Receiver<()>) -> Result<()> {
                 {
                     // 如果是按下了Capslock键位，则激活标识位
                     if code == ScanCode::CapsLock {
-                        caps_down = !state.contains(KeyState::UP); // DOWN = true
+                        caps_down = !state.contains(KeyState::UP);
+                        let ctrl_state = if state.contains(KeyState::UP) {
+                            KeyState::UP | KeyState::E0
+                        } else {
+                            KeyState::DOWN | KeyState::E0
+                        };
+                        let ctrl_stroke = Stroke::Keyboard {
+                            code: ScanCode::LeftControl,
+                            state: ctrl_state,
+                            information,
+                        };
+                        intercept.send(dev, &[ctrl_stroke]);
                         continue;
                     }
                     //  下一个键位过来的时候，此时caps是否被激活了，被激活了，则触发组合键的功能
@@ -151,35 +162,95 @@ fn keyboard_interceptor(exit_rx: Receiver<()>) -> Result<()> {
                                 information,
                             },
                             // 方向左键
-                            ScanCode::H => Stroke::Keyboard {
-                                code: ScanCode::Numpad4,
-                                state: e0_extra_key_state(state),
-                                information,
-                            },
-                            // 方向右键
-                            ScanCode::L => Stroke::Keyboard {
-                                code: ScanCode::Numpad6,
-                                state: e0_extra_key_state(state),
-                                information,
-                            },
-                            // 方向上键
-                            ScanCode::J => Stroke::Keyboard {
-                                code: ScanCode::Numpad8,
-                                state: e0_extra_key_state(state),
-                                information,
-                            },
-                            // 方向下键
-                            ScanCode::K => Stroke::Keyboard {
-                                code: ScanCode::Numpad2,
-                                state: e0_extra_key_state(state),
-                                information,
-                            },
-                            // ctrl + left
-                            ScanCode::B => {
-                                // 开始模拟ctrl键位
+                            ScanCode::H => {
+                                let ctrl_state = if state.contains(KeyState::UP) {
+                                    KeyState::UP | KeyState::E0
+                                } else {
+                                    KeyState::DOWN | KeyState::E0
+                                };
                                 let ctrl_simulating = Stroke::Keyboard {
                                     code: ScanCode::LeftControl,
-                                    state,
+                                    state: ctrl_state,
+                                    information,
+                                };
+                                let left_simulating = Stroke::Keyboard {
+                                    code: ScanCode::Numpad4,
+                                    state: e0_extra_key_state(state),
+                                    information,
+                                };
+                                intercept.send(dev, &[ctrl_simulating, left_simulating]);
+                                continue;
+                            }
+                            // 方向右键
+                            ScanCode::L => {
+                                let ctrl_state = if state.contains(KeyState::UP) {
+                                    KeyState::UP | KeyState::E0
+                                } else {
+                                    KeyState::DOWN | KeyState::E0
+                                };
+                                let ctrl_simulating = Stroke::Keyboard {
+                                    code: ScanCode::LeftControl,
+                                    state: ctrl_state,
+                                    information,
+                                };
+                                let right_simulating = Stroke::Keyboard {
+                                    code: ScanCode::Numpad6,
+                                    state: e0_extra_key_state(state),
+                                    information,
+                                };
+                                intercept.send(dev, &[ctrl_simulating, right_simulating]);
+                                continue;
+                            }
+                            // 方向上键
+                            ScanCode::J => {
+                                let ctrl_state = if state.contains(KeyState::UP) {
+                                    KeyState::UP | KeyState::E0
+                                } else {
+                                    KeyState::DOWN | KeyState::E0
+                                };
+                                let ctrl_simulating = Stroke::Keyboard {
+                                    code: ScanCode::LeftControl,
+                                    state: ctrl_state,
+                                    information,
+                                };
+                                let up_simulating = Stroke::Keyboard {
+                                    code: ScanCode::Numpad8,
+                                    state: e0_extra_key_state(state),
+                                    information,
+                                };
+                                intercept.send(dev, &[ctrl_simulating, up_simulating]);
+                                continue;
+                            }
+                            // 方向下键
+                            ScanCode::K => {
+                                let ctrl_state = if state.contains(KeyState::UP) {
+                                    KeyState::UP | KeyState::E0
+                                } else {
+                                    KeyState::DOWN | KeyState::E0
+                                };
+                                let ctrl_simulating = Stroke::Keyboard {
+                                    code: ScanCode::LeftControl,
+                                    state: ctrl_state,
+                                    information,
+                                };
+                                let down_simulating = Stroke::Keyboard {
+                                    code: ScanCode::Numpad2,
+                                    state: e0_extra_key_state(state),
+                                    information,
+                                };
+                                intercept.send(dev, &[ctrl_simulating, down_simulating]);
+                                continue;
+                            }
+                            // ctrl + left
+                            ScanCode::B => {
+                                let ctrl_state = if state.contains(KeyState::UP) {
+                                    KeyState::UP | KeyState::E0
+                                } else {
+                                    KeyState::DOWN | KeyState::E0
+                                };
+                                let ctrl_simulating = Stroke::Keyboard {
+                                    code: ScanCode::LeftControl,
+                                    state: ctrl_state,
                                     information,
                                 };
                                 let left_simulating = Stroke::Keyboard {
@@ -192,10 +263,14 @@ fn keyboard_interceptor(exit_rx: Receiver<()>) -> Result<()> {
                             }
                             // ctrl + right
                             ScanCode::F => {
-                                // 开始模拟ctrl键位
+                                let ctrl_state = if state.contains(KeyState::UP) {
+                                    KeyState::UP | KeyState::E0
+                                } else {
+                                    KeyState::DOWN | KeyState::E0
+                                };
                                 let ctrl_simulating = Stroke::Keyboard {
                                     code: ScanCode::LeftControl,
-                                    state,
+                                    state: ctrl_state,
                                     information,
                                 };
                                 let right_simulating = Stroke::Keyboard {
@@ -397,14 +472,11 @@ fn ctrl_simulating(
 // 2. 处理E0扩展键序列（左方向键的核心逻辑）
 // 日志显示：E0序列以LeftShift(0x2a, state含E0)开头，Numpad4(0x4b, state含E0)跟进
 fn e0_extra_key_state(state: KeyState) -> KeyState {
-    let new_state = if state.contains(KeyState::UP) {
-        // 释放事件：保留E0和UP标志（匹配日志中的state格式）
-        KeyState::UP | KeyState::E0 | KeyState::E1
+    if state.contains(KeyState::UP) {
+        KeyState::UP | KeyState::E0
     } else {
-        // 按下事件：保留E0标志
         KeyState::E0
-    };
-    new_state
+    }
 }
 /// 检查当前是否所有按键都处于释放状态
 static CLEARED_WEIRD: std::sync::Once = std::sync::Once::new();
