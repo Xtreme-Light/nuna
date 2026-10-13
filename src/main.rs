@@ -29,6 +29,11 @@ use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
 /// 程序入口函数
 /// 初始化日志系统、拦截驱动，然后进入事件循环处理键盘事件
 fn main() -> Result<()> {
+    // 无控制台的 GUI 程序：任何 panic 都弹窗展示，而不是无声退出只剩退出码
+    std::panic::set_hook(Box::new(|info| {
+        fatal_dialog("nuna 发生内部错误", &info.to_string());
+    }));
+
     let instance = SingleInstance::new("nuna.exe")?;
     if !instance.is_single() {
         fatal_dialog("nuna", "已有实例正在运行，请勿重复启动。");

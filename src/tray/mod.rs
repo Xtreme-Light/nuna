@@ -11,8 +11,6 @@ enum UserEvent {
 }
 /// 初始化系统托盘
 pub fn init_tray(exit_tx: Sender<()>) -> Result<()> {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/panda.ico");
-
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
 
     // set a tray event handler that forwards the event and wakes up the event loop
@@ -55,7 +53,7 @@ pub fn init_tray(exit_tx: Sender<()>) -> Result<()> {
 
         match event {
             Event::NewEvents(tao::event::StartCause::Init) => {
-                let icon = load_icon(std::path::Path::new(path));
+                let icon = load_icon();
 
                 // We create the icon once the event loop is actually running
                 // to prevent issues like https://github.com/tauri-apps/tray-icon/issues/90
@@ -88,10 +86,12 @@ pub fn init_tray(exit_tx: Sender<()>) -> Result<()> {
 }
 
 /// 加载自定义托盘图标
-fn load_icon(path: &std::path::Path) -> tray_icon::Icon {
+/// 图标内嵌进二进制，避免依赖编译期绝对路径（CI 上编译的 CARGO_MANIFEST_DIR
+/// 在用户机器上不存在，曾导致托盘初始化 panic 后整个程序 0xC0000409 闪退）
+fn load_icon() -> tray_icon::Icon {
     let (icon_rgba, icon_width, icon_height) = {
-        let image = image::open(path)
-            .expect("Failed to open icon path")
+        let image = image::load_from_memory(include_bytes!("../../assets/panda.ico"))
+            .expect("Failed to decode embedded icon")
             .into_rgba8();
         let (width, height) = image.dimensions();
         let rgba = image.into_raw();
