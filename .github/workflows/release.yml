@@ -43,6 +43,16 @@ jobs:
           # 复制可执行文件（替换为你的项目名称）
           $exePath = "target/x86_64-pc-windows-msvc/release/nuna.exe"
           Copy-Item -Path $exePath -Destination "release_dir/"
+
+          # interception.dll 是 nuna.exe 的动态链接依赖，必须和 exe 放在同一目录，
+          # 否则 exe 启动直接报"缺少 interception.dll"
+          $dllPath = "Interception/library/x64/interception.dll"
+          if (Test-Path $dllPath) {
+              Copy-Item -Path $dllPath -Destination "release_dir/"
+          } else {
+              Write-Error "未找到 $dllPath，无法打包"
+              exit 1
+          }
           
           # 复制Interception目录（保持结构）
           if (Test-Path "Interception") {

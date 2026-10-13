@@ -17,18 +17,21 @@ use kanata_interception::{Device, Interception, KeyState, ScanCode, Stroke};
 use log::LevelFilter;
 use simplelog::{ColorChoice, CombinedLogger, ConfigBuilder, TermLogger, TerminalMode};
 use single_instance::SingleInstance;
+use windows::core::PCWSTR;
 use windows::Win32::Foundation::LPARAM;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, GetKeyNameTextW, VK_DELETE, VK_DOWN, VK_END, VK_HOME, VK_INSERT, VK_LCONTROL,
     VK_LEFT, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_NEXT, VK_PRIOR, VK_RCONTROL, VK_RIGHT, VK_RMENU,
     VK_RSHIFT, VK_RWIN, VK_UP,
 };
+use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
 
 /// 程序入口函数
 /// 初始化日志系统、拦截驱动，然后进入事件循环处理键盘事件
 fn main() -> Result<()> {
     let instance = SingleInstance::new("nuna.exe")?;
     if !instance.is_single() {
+        fatal_dialog("nuna", "已有实例正在运行，请勿重复启动。");
         return Err(anyhow::anyhow!("已有单例正在执行，请勿重复启动"));
     };
 
@@ -43,6 +46,10 @@ fn main() -> Result<()> {
     std::thread::spawn(move || {
         if let Err(e) = keyboard_interceptor(exit_rx) {
             log::error!("键盘拦截线程出错: {}", e);
+            // 无控制台的 GUI 程序，致命错误必须弹窗告知并退出，
+            // 否则只会留下一个无意义的退出码（如 0xC0000409）
+            fatal_dialog("nuna 运行出错", &format!("{e:#}"));
+            std::process::exit(1);
         }
     });
 
@@ -67,16 +74,20 @@ fn keyboard_interceptor(exit_rx: Receiver<()>) -> Result<()> {
     }
 
     // 初始化 Interception 驱动
-    // 若驱动未安装则提示用户安装方法
-    let intercept = Interception::new().expect(
-        "interception driver 未安装，请下载安装。\n
-        下载地址： https://github.com/oblitum/Interception \n
-        安装步骤：\n
-        1. 下载完成后，使用管理员权限打开命令行工具\n
-        2. 在 interception 所在文件夹运行 install-interception /install 进行安装\n
-        3. 使用 install-interception /uninstall 进行卸载\n
-        注意：安装后需要重启电脑生效",
-    );
+    // 若驱动未安装则弹窗提示用户安装方法（返回 Err 由线程统一弹窗）
+    let intercept = match Interception::new() {
+        Some(intercept) => intercept,
+        None => {
+            return Err(anyhow::anyhow!(
+                "未找到 interception 驱动（本机未安装或未重启生效）。\n\
+                 安装步骤：\n\
+                 1. 下载 https://github.com/oblitum/Interception\n\
+                 2. 使用管理员权限打开命令行工具\n\
+                 3. 在 interception 所在文件夹运行 install-interception /install\n\
+                 4. 重启电脑生效"
+            ));
+        }
+    };
 
     // 设置拦截过滤器：拦截所有键盘事件
     intercept.set_filter(ic::is_keyboard, ic::Filter::KeyFilter(ic::KeyFilter::all()));
@@ -168,8 +179,25 @@ fn keyboard_interceptor(exit_rx: Receiver<()>) -> Result<()> {
         }
     }
 }
-fn init_log() {
-    // 配置日志系统
+/// 无控制台的 GUI 程序，致命错误必须弹窗告知用户，
+/// 否则 panic/abort 只会留下一个无意义的退出码
+fn fatal_dialog(title: &str, text: &str) {
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+    let title = wide(title);
+    let text = wide(text);
+    unsafe {
+        MessageBoxW(
+            None,
+            PCWSTR::from_raw(text.as_ptr()),
+            PCWSTR::from_raw(title.as_ptr()),
+            MB_OK | MB_ICONERROR,
+        );
+    }
+}
+
+fn init_log() {    // 配置日志系统
     // 尝试将日志时间设置为本地时间，若失败则输出警告
     let mut log_config = ConfigBuilder::new();
     if let Err(e) = log_config.set_time_offset_to_local() {
