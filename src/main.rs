@@ -1,22 +1,30 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-//! 该程序使用 kanata_interception 库拦截键盘事件，实现将 CapsLock 键映射为 Left Ctrl 键的功能。
-//! 映射采用"按下/抬起严格配对"的方式注入：每个注入的 DOWN 都保证有配对的 UP，
+//! 该程序使用 kanata_interception 库拦截键盘事件，实现 CapsLock 组合键的增强映射。
+//! 映射表可通过托盘菜单"按键配置"打开的配置窗口按按键采集（类似 SharpKeys），
+//! 保存到 exe 同目录的 config.json 并即时生效；无配置文件时使用内置默认映射。
+//!
+//! 注入采用"按下/抬起严格配对"的方式：每个注入的 DOWN 都保证有配对的 UP，
 //! 避免本机或云桌面/远程桌面这类只透传按键流的会话出现按键卡住（影子按键）的问题。
 
 // 导入模块
+mod config_ui;
 mod keys;
+mod mapping;
 mod oscode;
 mod tray;
 
 // 导入所需的外部库和模块
+use crate::mapping::{CaptureMsg, KeyMapping};
 use crate::tray::init_tray;
 use anyhow::Result;
-use crossbeam_channel::{Receiver, unbounded};
+use crossbeam_channel::{Receiver, Sender, unbounded};
 use kanata_interception as ic;
 use kanata_interception::{Device, Interception, KeyState, ScanCode, Stroke};
 use log::LevelFilter;
 use simplelog::{ColorChoice, CombinedLogger, ConfigBuilder, TermLogger, TerminalMode};
 use single_instance::SingleInstance;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::LPARAM;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -26,8 +34,20 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
 
+/// 全局共享状态：拦截线程、托盘、配置窗口三者之间的通信载体
+pub struct AppShared {
+    /// 当前生效的映射表（配置窗口保存后更新，拦截线程每个按键事件读取）
+    pub mappings: Mutex<Vec<KeyMapping>>,
+    /// 采集模式：开启后拦截线程只记录按下的组合并上报，不下发任何按键
+    pub capture_on: AtomicBool,
+    /// 采集结果通道（拦截线程 -> 配置窗口）
+    pub capture_tx: Sender<CaptureMsg>,
+    pub capture_rx: Receiver<CaptureMsg>,
+    /// 配置窗口是否已打开（避免重复开窗）
+    pub ui_open: AtomicBool,
+}
+
 /// 程序入口函数
-/// 初始化日志系统、拦截驱动，然后进入事件循环处理键盘事件
 fn main() -> Result<()> {
     // 无控制台的 GUI 程序：任何 panic 都弹窗展示，而不是无声退出只剩退出码
     std::panic::set_hook(Box::new(|info| {
@@ -44,28 +64,75 @@ fn main() -> Result<()> {
 
     log::info!("程序启动中...");
 
+    // 加载键位映射配置（无文件时使用默认）
+    let (mappings, warn) = mapping::load_config();
+    if let Some(w) = warn {
+        log::warn!("{}", w);
+        fatal_dialog("nuna 配置文件异常", &w);
+    }
+    log::info!("已加载 {} 条按键映射", mappings.len());
+
+    let (capture_tx, capture_rx) = unbounded();
+    let shared = Arc::new(AppShared {
+        mappings: Mutex::new(mappings),
+        capture_on: AtomicBool::new(false),
+        capture_tx,
+        capture_rx,
+        ui_open: AtomicBool::new(false),
+    });
+
     // 创建退出信号通道
     let (exit_tx, exit_rx) = unbounded();
 
     // 启动键盘拦截线程
-    std::thread::spawn(move || {
-        if let Err(e) = keyboard_interceptor(exit_rx) {
-            log::error!("键盘拦截线程出错: {}", e);
-            // 无控制台的 GUI 程序，致命错误必须弹窗告知并退出，
-            // 否则只会留下一个无意义的退出码（如 0xC0000409）
-            fatal_dialog("nuna 运行出错", &format!("{e:#}"));
-            std::process::exit(1);
-        }
-    });
+    {
+        let shared = shared.clone();
+        std::thread::spawn(move || {
+            if let Err(e) = keyboard_interceptor(exit_rx, shared) {
+                log::error!("键盘拦截线程出错: {}", e);
+                // 无控制台的 GUI 程序，致命错误必须弹窗告知并退出，
+                // 否则只会留下一个无意义的退出码（如 0xC0000409）
+                fatal_dialog("nuna 运行出错", &format!("{e:#}"));
+                std::process::exit(1);
+            }
+        });
+    }
 
     // 初始化系统托盘
-    let _tray_icon = init_tray(exit_tx)?;
+    let _tray_icon = init_tray(exit_tx, shared)?;
     log::info!("系统托盘初始化完成");
 
     Ok(())
 }
 
-fn keyboard_interceptor(exit_rx: Receiver<()>) -> Result<()> {
+/// caps 层内一条已注入的映射：记录原始键码、命中的映射以及需要抵消的真实修饰键，
+/// 用于在任意松开顺序下构造与按下序列严格配对的抬起序列
+struct InjectedKey {
+    dev: Device,
+    /// 原始物理键（扫描码 + E0），用于把后续 UP/重复 DOWN 路由回来
+    code: u16,
+    ext: bool,
+    /// 命中的映射（抬起序列由它生成）
+    mapping: KeyMapping,
+    /// 命中时被抵消抬起的真实修饰键位（Caps 不经过系统，无需抵消）
+    suppress_bits: u16,
+    /// 按下序列（重复 DOWN 时重发）
+    downs: Vec<Stroke>,
+}
+
+impl InjectedKey {
+    /// 抬起序列：目标组合反序抬起 + 把仍被物理按住的抵消修饰键恢复按下。
+    /// restore_bits 由调用方根据"此刻仍按住的修饰键"计算
+    fn ups(&self, restore_bits: u16, information: u32) -> Vec<Stroke> {
+        let mut v = mapping::mapping_ups(&self.mapping, information);
+        if restore_bits != 0 {
+            v.extend(mapping::mods_down_strokes(restore_bits, information));
+        }
+        v
+    }
+}
+
+fn keyboard_interceptor(exit_rx: Receiver<()>, shared: Arc<AppShared>) -> Result<()> {
     log::info!("等待所有的键释放");
     // 动态等待直到所有按键释放
     init_keyboard_state(); // Call once
@@ -97,8 +164,7 @@ fn keyboard_interceptor(exit_rx: Receiver<()>) -> Result<()> {
     // 设置拦截过滤器：拦截所有键盘事件
     intercept.set_filter(ic::is_keyboard, ic::Filter::KeyFilter(ic::KeyFilter::all()));
 
-    // 初始化键盘事件缓冲区，用于接收拦截到的事件
-    // 缓冲区大小为 32，初始值为 Esc 键的空状态（仅用于初始化，实际会被覆盖）
+    // 初始化键盘事件缓冲区
     let mut strokes = [Stroke::Keyboard {
         code: ScanCode::Esc,
         state: KeyState::empty(),
@@ -106,9 +172,9 @@ fn keyboard_interceptor(exit_rx: Receiver<()>) -> Result<()> {
     }; 32];
 
     log::info!("interception 驱动已加载，开始监听键盘事件...");
-    // 用于跟踪CapsLock(已映射为虚拟键)的按下状态
-    let mut caps_down = false;
-    // caps 层内已注入且尚未抬起的键：保证每个注入的 DOWN 最终都有配对的 UP
+    // 当前物理按住的修饰键位集合
+    let mut held_mods: u16 = 0;
+    // 已注入且尚未抬起的键（DOWN/UP 配对表）
     let mut injected: Vec<InjectedKey> = Vec::new();
 
     loop {
@@ -124,85 +190,157 @@ fn keyboard_interceptor(exit_rx: Receiver<()>) -> Result<()> {
 
         // 若检测到有效设备（dev > 0 表示有键盘事件）
         if dev > 0 {
-            // 接收设备发送的键盘事件，存储到缓冲区
             let num_strokes = intercept.receive(dev, &mut strokes) as usize;
 
-            // 遍历处理每个接收到的事件
             for i in 0..num_strokes {
-                let original_stroke = strokes[i]; // 复制当前事件（用于可能的修改）
-                if let Stroke::Keyboard {
-                    code,
-                    state,
-                    information,
-                } = original_stroke
-                {
-                    let is_up = state.contains(KeyState::UP);
-
-                    // CapsLock 本身不下发，只用来维护 caps 层的开关状态
-                    if code == ScanCode::CapsLock {
-                        // 松开（或再次按下）caps 时，立即抬掉该层所有仍按着的注入键。
-                        // 不能依赖各按键自己的 UP 事件：用户可能先松 caps 再松按键，
-                        // 那时 caps_down 已变回 false，UP 会被原样放行，之前注入的
-                        // Ctrl/方向键就永远停在按下状态 —— 这就是影子按键/卡 Ctrl 的根源
-                        release_all_injected(&intercept, &mut injected);
-                        caps_down = !is_up;
+                let original_stroke = strokes[i];
+                let (code, ext, state, information) = match original_stroke {
+                    Stroke::Keyboard {
+                        code,
+                        state,
+                        information,
+                    } => (code as u16, state.contains(KeyState::E0), state, information),
+                    _ => {
+                        // 非键盘事件原样放行
+                        intercept.send(dev, &[original_stroke]);
                         continue;
                     }
+                };
+                let is_up = state.contains(KeyState::UP);
 
-                    // 按下时被映射注入过的键：无论此刻 caps 是否还按着，
-                    // UP/重复 DOWN 一律按当初注入的内容配对处理
-                    if let Some(pos) = injected.iter().position(|e| e.code == code as u8) {
+                // ---- 1) 修饰键：维护按住状态；采集模式下吞掉不下发 ----
+                if let Some(bit) = mapping::modifier_bit(code, ext) {
+                    if shared.capture_on.load(Ordering::Relaxed) {
+                        // 采集期间修饰键不下发（避免误触发 CapsLock 切换/系统快捷键），只记录状态
                         if is_up {
-                            let entry = injected.remove(pos);
-                            intercept.send(entry.dev, &entry.ups);
+                            held_mods &= !bit;
                         } else {
-                            // 硬件自动重复产生的 DOWN：重发按下序列，保留连续触发的手感
-                            let entry = &injected[pos];
-                            intercept.send(entry.dev, &entry.downs);
+                            held_mods |= bit;
                         }
                         continue;
                     }
+                    if is_up {
+                        held_mods &= !bit;
+                        // 命中组合里包含该修饰键的注入条目必须立即抬起：
+                        // 用户可能先松修饰键再松主键（例如先松 Caps 再松 C），
+                        // 若等主键自己的 UP，注入的 Ctrl/方向键就永远停在按下状态
+                        flush_entries_with_mod(&intercept, &mut injected, bit, held_mods);
+                    } else {
+                        held_mods |= bit;
+                    }
+                    // 修饰键本身原样放行
+                    intercept.send(dev, &[original_stroke]);
+                    continue;
+                }
 
-                    // caps 层内新按下的可映射键：成对生成 按下/抬起 序列并记录
-                    if caps_down && !is_up {
-                        if let Some((downs, ups)) = build_mapping(code, information) {
-                            intercept.send(dev, &downs);
-                            injected.push(InjectedKey {
+                // ---- 2) 采集模式：非修饰键即采集结果（Esc 取消），期间全部吞掉 ----
+                if shared.capture_on.load(Ordering::Relaxed) {
+                    if !is_up {
+                        let msg = if code == ScanCode::Esc as u16 {
+                            CaptureMsg::Cancelled
+                        } else {
+                            CaptureMsg::Combo {
+                                mods: held_mods,
+                                code,
+                                ext,
+                            }
+                        };
+                        let _ = shared.capture_tx.send(msg);
+                        shared.capture_on.store(false, Ordering::Relaxed);
+                    }
+                    continue;
+                }
+
+                // ---- 3) 已注入过的键：UP 配对补发 / 重复 DOWN 重发 ----
+                if let Some(pos) = injected
+                    .iter()
+                    .position(|e| e.code == code && e.ext == ext)
+                {
+                    if is_up {
+                        let entry = injected.remove(pos);
+                        // 仍被物理按住的抵消修饰键要恢复按下（如 Ctrl+X→Home 松开 X 时 Ctrl 还按着）
+                        let restore_bits = entry.suppress_bits & held_mods;
+                        intercept.send(entry.dev, &entry.ups(restore_bits, information));
+                    } else {
+                        // 硬件自动重复产生的 DOWN：重发按下序列，保留连续触发的手感
+                        let entry = &injected[pos];
+                        intercept.send(entry.dev, &entry.downs);
+                    }
+                    continue;
+                }
+
+                // ---- 4) 查映射表：按下的组合(修饰键集合+主键)精确匹配 ----
+                if !is_up {
+                    let hit = shared
+                        .mappings
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .find(|m| m.src_mods == held_mods && m.src_code == code && m.src_ext == ext)
+                        .copied();
+                    if let Some(m) = hit {
+                        // 原始组合里的真实修饰键（非 Caps）此前已放行、系统认为处于按下态，
+                        // 注入目标组合前要先抵消抬起，否则会变成 修饰键+目标键 的叠加（如 Ctrl+Home）
+                        let suppress_bits = m.src_mods & !mapping::M_CAPS;
+                        if suppress_bits != 0 {
+                            intercept.send(
                                 dev,
-                                code: code as u8,
-                                downs,
-                                ups,
-                            });
-                            continue;
+                                &mapping::mods_up_strokes(suppress_bits, information),
+                            );
                         }
+                        let downs = mapping::mapping_downs(&m, information);
+                        intercept.send(dev, &downs);
+                        injected.push(InjectedKey {
+                            dev,
+                            code,
+                            ext,
+                            mapping: m,
+                            suppress_bits,
+                            downs,
+                        });
+                        continue;
                     }
                 }
 
-                // 其余事件（未映射的按键、以及各种未被上面命中的情况）原样放行
+                // ---- 5) 其余事件原样放行 ----
                 intercept.send(dev, &[original_stroke]);
             }
         }
     }
 }
-/// 无控制台的 GUI 程序，致命错误必须弹窗告知用户，
-/// 否则 panic/abort 只会留下一个无意义的退出码
-fn fatal_dialog(title: &str, text: &str) {
-    fn wide(s: &str) -> Vec<u16> {
-        s.encode_utf16().chain(std::iter::once(0)).collect()
+
+/// 按后按先抬的顺序，把所有仍处于按下状态的注入键全部抬起
+fn release_all_injected(intercept: &Interception, injected: &mut Vec<InjectedKey>) {
+    if !injected.is_empty() {
+        log::info!("抬起 {} 个仍处于按下状态的注入键", injected.len());
     }
-    let title = wide(title);
-    let text = wide(text);
-    unsafe {
-        MessageBoxW(
-            None,
-            PCWSTR::from_raw(text.as_ptr()),
-            PCWSTR::from_raw(title.as_ptr()),
-            MB_OK | MB_ICONERROR,
-        );
+    while let Some(entry) = injected.pop() {
+        // 全量抬起时不恢复抵消修饰键（通常来自退出/兜底路径）
+        intercept.send(entry.dev, &mapping::mapping_ups(&entry.mapping, 0));
     }
 }
 
-fn init_log() {    // 配置日志系统
+/// 抬起所有"命中组合包含指定修饰键位"的注入条目（该修饰键被松开时调用）。
+/// held_mods 为松开该键后的剩余按住集合，用于决定是否恢复其它抵消修饰键
+fn flush_entries_with_mod(
+    intercept: &Interception,
+    injected: &mut Vec<InjectedKey>,
+    bit: u16,
+    held_mods: u16,
+) {
+    let mut i = injected.len();
+    while i > 0 {
+        i -= 1;
+        if injected[i].mapping.src_mods & bit != 0 {
+            let entry = injected.remove(i);
+            let restore_bits = entry.suppress_bits & held_mods;
+            intercept.send(entry.dev, &entry.ups(restore_bits, 0));
+        }
+    }
+}
+
+fn init_log() {
+    // 配置日志系统
     // 尝试将日志时间设置为本地时间，若失败则输出警告
     let mut log_config = ConfigBuilder::new();
     if let Err(e) = log_config.set_time_offset_to_local() {
@@ -220,135 +358,29 @@ fn init_log() {    // 配置日志系统
     log::info!("日志初始化成功");
 }
 
-/// caps 层内一条已注入的映射：记录原始键码、注入所用的设备，
-/// 以及和按下序列严格配对的抬起序列
-struct InjectedKey {
-    dev: Device,
-    code: u8,
-    downs: Vec<Stroke>,
-    ups: Vec<Stroke>,
-}
-
-/// 按后按先抬的顺序，把所有仍处于按下状态的注入键全部抬起
-fn release_all_injected(intercept: &Interception, injected: &mut Vec<InjectedKey>) {
-    if !injected.is_empty() {
-        log::info!("抬起 {} 个仍处于按下状态的注入键", injected.len());
+/// 无控制台的 GUI 程序，致命错误必须弹窗告知用户，
+/// 否则 panic/abort 只会留下一个无意义的退出码
+pub(crate) fn fatal_dialog(title: &str, text: &str) {
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
     }
-    while let Some(entry) = injected.pop() {
-        intercept.send(entry.dev, &entry.ups);
-    }
-}
-
-/// 为 caps 层内按下的键生成 (按下序列, 抬起序列)。
-/// 两条序列必须一一配对，否则接收端——无论是本机应用，还是云桌面/远程桌面
-/// 这类只透传按键流的会话——都会认为按键一直被按住，表现为 Ctrl 卡键等影子按键
-fn build_mapping(code: ScanCode, information: u32) -> Option<(Vec<Stroke>, Vec<Stroke>)> {
-    // E0 扩展序列（小键盘扫描码 + E0 = 方向/编辑键），抬起状态按实测日志补上 E0|E1
-    let e0_down = e0_extra_key_state(KeyState::DOWN); // => E0
-    let e0_up = e0_extra_key_state(KeyState::UP); // => UP|E0|E1
-
-    // 单键替换：按下和抬起使用同一个扫描码
-    let single =
-        |mapped: ScanCode, down: KeyState, up: KeyState| -> (Vec<Stroke>, Vec<Stroke>) {
-            (
-                vec![Stroke::Keyboard {
-                    code: mapped,
-                    state: down,
-                    information,
-                }],
-                vec![Stroke::Keyboard {
-                    code: mapped,
-                    state: up,
-                    information,
-                }],
-            )
-        };
-    // ctrl 组合键：按下 [ctrl, key]，抬起 [key, ctrl]，顺序严格相反。
-    // 注意：左 Ctrl 的扫描码(0x1D)不能带 E0，E0|1D 是右 Ctrl；
-    // 混用会导致本机与远程会话两侧的修饰键状态对不上，是卡 Ctrl 的诱因之一
-    let with_ctrl =
-        |mapped: ScanCode, down: KeyState, up: KeyState| -> (Vec<Stroke>, Vec<Stroke>) {
-            (
-                vec![
-                    Stroke::Keyboard {
-                        code: ScanCode::LeftControl,
-                        state: KeyState::DOWN,
-                        information,
-                    },
-                    Stroke::Keyboard {
-                        code: mapped,
-                        state: down,
-                        information,
-                    },
-                ],
-                vec![
-                    Stroke::Keyboard {
-                        code: mapped,
-                        state: up,
-                        information,
-                    },
-                    Stroke::Keyboard {
-                        code: ScanCode::LeftControl,
-                        state: KeyState::UP,
-                        information,
-                    },
-                ],
-            )
-        };
-
-    match code {
-        // Caps + Space = Backspace
-        ScanCode::Space => Some(single(ScanCode::Backspace, KeyState::DOWN, KeyState::UP)),
-        // Caps + D = Del
-        ScanCode::D => Some(single(ScanCode::NumpadPeriod, e0_down, e0_up)),
-        // Caps + A = Home
-        ScanCode::A => Some(single(ScanCode::Numpad7, e0_down, e0_up)),
-        // Caps + E = End
-        ScanCode::E => Some(single(ScanCode::Numpad1, e0_down, e0_up)),
-        // 方向左键
-        ScanCode::H => Some(single(ScanCode::Numpad4, e0_down, e0_up)),
-        // 方向右键
-        ScanCode::L => Some(single(ScanCode::Numpad6, e0_down, e0_up)),
-        // 方向上键
-        ScanCode::J => Some(single(ScanCode::Numpad8, e0_down, e0_up)),
-        // 方向下键
-        ScanCode::K => Some(single(ScanCode::Numpad2, e0_down, e0_up)),
-        // Caps + B = Ctrl + Left
-        ScanCode::B => Some(with_ctrl(ScanCode::Numpad4, e0_down, e0_up)),
-        // Caps + F = Ctrl + Right
-        ScanCode::F => Some(with_ctrl(ScanCode::Numpad6, e0_down, e0_up)),
-        // Caps + Z/X/C/V/W = Ctrl + 对应键
-        ScanCode::Z => Some(with_ctrl(ScanCode::Z, KeyState::DOWN, KeyState::UP)),
-        ScanCode::X => Some(with_ctrl(ScanCode::X, KeyState::DOWN, KeyState::UP)),
-        ScanCode::C => Some(with_ctrl(ScanCode::C, KeyState::DOWN, KeyState::UP)),
-        ScanCode::V => Some(with_ctrl(ScanCode::V, KeyState::DOWN, KeyState::UP)),
-        ScanCode::W => Some(with_ctrl(ScanCode::W, KeyState::DOWN, KeyState::UP)),
-        // Caps + Q = Ctrl + A
-        ScanCode::Q => Some(with_ctrl(ScanCode::A, KeyState::DOWN, KeyState::UP)),
-        // Caps + S = Ctrl + S
-        ScanCode::S => Some(with_ctrl(ScanCode::S, KeyState::DOWN, KeyState::UP)),
-        _ => None,
+    let title = wide(title);
+    let text = wide(text);
+    unsafe {
+        MessageBoxW(
+            None,
+            PCWSTR::from_raw(text.as_ptr()),
+            PCWSTR::from_raw(title.as_ptr()),
+            MB_OK | MB_ICONERROR,
+        );
     }
 }
 
-// 2. 处理E0扩展键序列（左方向键的核心逻辑）
-// 日志显示：E0序列以LeftShift(0x2a, state含E0)开头，Numpad4(0x4b, state含E0)跟进
-fn e0_extra_key_state(state: KeyState) -> KeyState {
-    let new_state = if state.contains(KeyState::UP) {
-        // 释放事件：保留E0和UP标志（匹配日志中的state格式）
-        KeyState::UP | KeyState::E0 | KeyState::E1
-    } else {
-        // 按下事件：保留E0标志
-        KeyState::E0
-    };
-    new_state
-}
 /// 检查当前是否所有按键都处于释放状态
 static CLEARED_WEIRD: std::sync::Once = std::sync::Once::new();
 
 pub fn init_keyboard_state() {
     CLEARED_WEIRD.call_once(|| {
-        // Existing weird keys...
         let weird = [
             VK_HOME,
             VK_END,
@@ -360,7 +392,6 @@ pub fn init_keyboard_state() {
             VK_RIGHT,
             VK_UP,
             VK_DOWN,
-            // NEW: Flush ALL modifiers to prevent ghosting
             VK_LCONTROL,
             VK_RCONTROL,
             VK_LSHIFT,
@@ -375,12 +406,10 @@ pub fn init_keyboard_state() {
                 windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(i32::from(vk.0));
             }
         }
-        // Extra: Force-send UP for all modifiers (safe, as they're likely up)
-        // You'll need access to Interception here—move this to main() post-init if preferred
     });
 }
 
-/// Ultra-fast version after init_keyboard_state() was called once
+/// 启动等待所有按键释放时使用的快速检测
 pub fn are_all_keys_released() -> bool {
     const WEIRD: [u16; 18] = [
         0x21,
@@ -393,7 +422,6 @@ pub fn are_all_keys_released() -> bool {
         0x28, // Left, Up, Right, Down
         0x2D,
         0x2E,
-        // NEW: Modifiers (treat as "weird" to avoid false positives)
         VK_LCONTROL.0,
         VK_RCONTROL.0,
         VK_LSHIFT.0,
@@ -401,7 +429,7 @@ pub fn are_all_keys_released() -> bool {
         VK_LMENU.0,
         VK_RMENU.0,
         VK_LWIN.0,
-        VK_RWIN.0, // Insert, Delete
+        VK_RWIN.0,
     ];
 
     for code in 1u16..=255u16 {
@@ -419,12 +447,12 @@ pub fn are_all_keys_released() -> bool {
     }
     true
 }
+
 //  获取键位状态，false没有按下，true 按下
 //  卡键修复已改为确定性记账（InjectedKey 配对表），不再依赖 GetAsyncKeyState 探测，
 //  该函数目前仅测试使用
 #[allow(unused)]
 pub fn is_key_down(vk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY) -> bool {
-    // These keys have bit 15 permanently set when up
     const WEIRD_KEYS: [u16; 8] = [
         VK_HOME.0,
         VK_END.0,
@@ -440,11 +468,9 @@ pub fn is_key_down(vk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY)
     unsafe {
         let state = GetAsyncKeyState(i32::from(code));
         if WEIRD_KEYS.contains(&code) {
-            // For these keys, bit 0 = was pressed since last call
-            // (you usually need to call it twice or clear it manually)
             state & 1 != 0
         } else {
-            state < 0 // normal keys: bit 15 = currently down
+            state < 0
         }
     }
 }
@@ -464,7 +490,6 @@ mod tests {
 
         println!("HOME: {home}   LSHIFT: {shift}   A: {a}");
 
-        // This will now PASS when Home is not pressed
         assert!(!home, "Home key is reported as down but it should be up");
     }
 }

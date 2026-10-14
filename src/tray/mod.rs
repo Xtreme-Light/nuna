@@ -1,5 +1,7 @@
 use anyhow::Result;
+use crate::AppShared;
 use crossbeam_channel::Sender;
+use std::sync::Arc;
 use tao::event::Event;
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tray_icon::menu::{AboutMetadata, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
@@ -10,7 +12,7 @@ enum UserEvent {
     MenuEvent(MenuEvent),
 }
 /// 初始化系统托盘
-pub fn init_tray(exit_tx: Sender<()>) -> Result<()> {
+pub fn init_tray(exit_tx: Sender<()>, shared: Arc<AppShared>) -> Result<()> {
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
 
     // set a tray event handler that forwards the event and wakes up the event loop
@@ -30,8 +32,11 @@ pub fn init_tray(exit_tx: Sender<()>) -> Result<()> {
 
     // 创建菜单
     let tray_menu = Menu::new();
+    let config_i = MenuItem::new("按键配置", true, None);
     let quit_i = MenuItem::new("退出", true, None);
     tray_menu.append_items(&[
+        &config_i,
+        &PredefinedMenuItem::separator(),
         &quit_i,
         &PredefinedMenuItem::separator(),
         &PredefinedMenuItem::about(
@@ -77,6 +82,9 @@ pub fn init_tray(exit_tx: Sender<()>) -> Result<()> {
                     tray_icon.take();
                     exit_tx.send(()).unwrap();
                     *control_flow = ControlFlow::Exit;
+                } else if event.id == config_i.id() {
+                    // 打开按键映射配置窗口（独立线程，重复点击不会重复开窗）
+                    crate::config_ui::open(shared.clone());
                 }
             }
 
