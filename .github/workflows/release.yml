@@ -1,6 +1,9 @@
 name: Windows Build and Release
 
-# 仅在创建新Release时触发
+# 触发条件：
+# 1. 推送 v* 标签：构建并自动创建 GitHub Release（推荐的发版方式）
+# 2. 在 GitHub 页面上手动创建 Release：构建并把产物挂到该 Release
+# 3. 推送 master（非文档改动）：仅构建，产物放在 Actions Artifacts
 on:
   release:
     types: [created]
@@ -9,6 +12,8 @@ on:
     paths-ignore:
       - '**.md'  # 忽略所有Markdown文件的修改
       - 'docs/**'  # 忽略docs目录下的修改
+    tags:
+      - 'v*'  # 推送 v 开头的标签触发发版
 
 # 必要的权限配置
 permissions:
@@ -65,8 +70,9 @@ jobs:
         id: package
         shell: pwsh
         run: |
-          # 根据触发条件生成不同的文件名
-          if ("${{ github.event_name }}" -eq "release") {
+          # 根据触发条件生成不同的文件名（标签/Release 用版本号，普通推送用提交哈希）
+          $isTagOrRelease = "${{ github.ref }}".StartsWith("refs/tags/")
+          if ($isTagOrRelease) {
               $version = "${{ github.ref_name }}"
               $zipName = "nuna-windows-x64-$version.zip"
           } else {
@@ -97,10 +103,11 @@ jobs:
           retention-days: 1  # 临时保存1天
 
 
-  # 创建Release时：上传到GitHub Releases
+  # 标签推送或手动创建Release时：上传到GitHub Releases
   upload-release:
     needs: build-windows
-    if: github.event_name == 'release'  # 仅在release事件时执行
+    # 推送 v* 标签（不存在同名Release时自动创建）或手动创建Release
+    if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v')
     runs-on: windows-latest
     steps:
       - name: 下载临时ZIP文件
@@ -111,14 +118,22 @@ jobs:
       - name: 上传到GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.ref_name }}
+          name: nuna ${{ github.ref_name }}
+          body: |
+            CapsLock 增强小工具（Windows，需要 Interception 驱动）。
+
+            使用说明见 README。zip 内含 nuna.exe、interception.dll（两者需放在同一目录）
+            及 Interception 驱动安装包（首次使用需以管理员运行 install-interception /install 并重启）。
+          generate_release_notes: true
           files: ${{ needs.build-windows.outputs.zip-name }}
           draft: false
           prerelease: false
 
-  # main分支变动时：上传到Actions工件
+  # master分支变动时：上传到Actions工件
   upload-artifact:
     needs: build-windows
-    if: github.event_name == 'push'  # 仅在push事件时执行
+    if: github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/')  # 仅普通分支推送
     runs-on: windows-latest
     steps:
       - name: 显示构建产物名称（调试用）
