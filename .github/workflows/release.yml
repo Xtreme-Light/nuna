@@ -5,6 +5,7 @@ name: Windows Build and Release
 # 2. 在 GitHub 页面上手动创建 Release：构建并把产物挂到该 Release
 # 3. 推送 master（非文档改动）：仅构建，产物放在 Actions Artifacts
 on:
+  workflow_dispatch: {}  # 支持在Actions页面手动触发构建
   release:
     types: [created]
   push:
