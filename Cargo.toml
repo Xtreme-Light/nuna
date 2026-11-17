@@ -27,3 +27,7 @@ opt-level = "z"
 lto = "fat"
 panic = "abort"
 codegen-units = 1
+
+[build-dependencies]
+# 内嵌Windows应用程序清单（声明comctl32 v6依赖，否则nwg子类化API加载失败）
+embed-manifest = "1.4"
