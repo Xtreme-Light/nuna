@@ -1,5 +1,4 @@
 use anyhow::Result;
-use crossbeam_channel::Sender;
 use tao::event::Event;
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tray_icon::menu::{AboutMetadata, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
@@ -9,8 +8,8 @@ enum UserEvent {
     TrayIconEvent(TrayIconEvent),
     MenuEvent(MenuEvent),
 }
-/// 初始化系统托盘
-pub fn init_tray(exit_tx: Sender<()>) -> Result<()> {
+/// 初始化系统托盘（阻塞运行事件循环，用户点退出后返回）
+pub fn init_tray() -> Result<()> {
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
 
     // set a tray event handler that forwards the event and wakes up the event loop
@@ -40,7 +39,7 @@ pub fn init_tray(exit_tx: Sender<()>) -> Result<()> {
                 name: Some("nuna小程序".to_string()),
                 comments: Some("nuna小程序，增强CapsLock".to_string()),
                 authors: Some(vec!["Nuna".to_string()]),
-                short_version: Some("1.0".to_string()),
+                short_version: Some("0.1.1".to_string()),
                 ..Default::default()
             }),
         ),
@@ -75,7 +74,6 @@ pub fn init_tray(exit_tx: Sender<()>) -> Result<()> {
                 log::debug!("{event:?}");
                 if event.id == quit_i.id() {
                     tray_icon.take();
-                    exit_tx.send(()).unwrap();
                     *control_flow = ControlFlow::Exit;
                 }
             }

@@ -44,26 +44,21 @@ jobs:
         run: |
           # 创建临时打包目录
           New-Item -ItemType Directory -Path release_dir | Out-Null
-          
-          # 复制可执行文件（替换为你的项目名称）
+
+          # 复制可执行文件
+          # v0.1.1 起改用 WH_KEYBOARD_LL 低级键盘钩子：不再依赖 interception.dll，
+          # 无需安装任何驱动，exe 单文件即可运行
           $exePath = "target/x86_64-pc-windows-msvc/release/nuna.exe"
           Copy-Item -Path $exePath -Destination "release_dir/"
 
-          # interception.dll 是 nuna.exe 的动态链接依赖，必须和 exe 放在同一目录，
-          # 否则 exe 启动直接报"缺少 interception.dll"
-          $dllPath = "Interception/library/x64/interception.dll"
-          if (Test-Path $dllPath) {
-              Copy-Item -Path $dllPath -Destination "release_dir/"
+          # 附带 Interception 过滤器清理工具（给 v0.1.0 老用户善后用）
+          $scriptPath = "script/cleanup-interception.ps1"
+          if (Test-Path $scriptPath) {
+              New-Item -ItemType Directory -Path "release_dir/script" -Force | Out-Null
+              Copy-Item -Path "script/cleanup-interception.ps1", "script/cleanup-interception.bat" -Destination "release_dir/script/"
           } else {
-              Write-Error "未找到 $dllPath，无法打包"
+              Write-Error "未找到 $scriptPath，无法打包"
               exit 1
-          }
-          
-          # 复制Interception目录（保持结构）
-          if (Test-Path "Interception") {
-              Copy-Item -Path "Interception" -Destination "release_dir/" -Recurse
-          } else {
-              Write-Warning "Interception目录未找到"
           }
 
       - name: 打包为zip并输出文件名
@@ -121,10 +116,42 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: nuna ${{ github.ref_name }}
           body: |
-            CapsLock 增强小工具（Windows，需要 Interception 驱动）。
+            CapsLock 增强小工具（Windows）。
 
-            使用说明见 README。zip 内含 nuna.exe、interception.dll（两者需放在同一目录）
-            及 Interception 驱动安装包（首次使用需以管理员运行 install-interception /install 并重启）。
+            ## 🎉 本版本（v0.1.1）：彻底移除 Interception 驱动依赖
+
+            **v0.1.1 起无需安装任何驱动、无需管理员权限，解压运行 nuna.exe 即可。**
+            输入拦截改用 Windows 低级键盘钩子（WH_KEYBOARD_LL，实现参考 kanata 的 LLHOOK 后端），
+            键位映射行为与 v0.1.0 完全一致。
+
+            ### 修复的问题
+
+            v0.1.0 打包的 Interception 驱动安装器（install-interception /install）会默认把
+            keyboard 和 mouse 两个内核过滤驱动都写入系统，而其中的 mouse.sys 过滤驱动存在缺陷：
+            **USB 鼠标被拔插（设备重新枚举）后，它会吞掉鼠标输入事件**。症状：
+
+            - 设备管理器里鼠标一切正常；
+            - 鼠标与接收器配对正常；
+            - 但光标完全不动，触摸板正常，换 USB 口也无效；
+            - 日志里可见接收器频繁"意外删除"后重新枚举。
+
+            v0.1.1 不再安装任何过滤器，从根源上消除该问题。详见 README「v0.1.1 重要变更」一节。
+
+            ### ⚠️ 从 v0.1.0 升级的用户必做
+
+            如果装过 v0.1.0（跑过 install-interception /install），请运行 zip 内附带的清理工具
+            把残留的过滤器从注册表裁掉，否则鼠标失灵问题仍会复现：
+
+            - **双击 `script\cleanup-interception.bat`**：自动请求管理员权限，移除鼠标侧 mouse 过滤器（清理后重启电脑，或重新插拔一次鼠标接收器）；
+            - v0.1.1 用户推荐彻底清理（键盘侧过滤器也一并移除）：
+              `powershell -ExecutionPolicy Bypass -File script\cleanup-interception.ps1 -RemoveKeyboardToo`
+            - 工具会自动备份注册表，双击备份的 .reg 文件即可还原；
+            - 也可以用 v0.1.0 附带的 install-interception.exe /uninstall 彻底卸载驱动本体。
+
+            ### zip 内容
+
+            - nuna.exe —— 主程序（免驱动，双击即用，托盘退出）
+            - script\cleanup-interception.ps1 / .bat —— Interception 过滤器清理工具
           generate_release_notes: true
           files: ${{ needs.build-windows.outputs.zip-name }}
           draft: false
