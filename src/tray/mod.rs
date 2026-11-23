@@ -1,8 +1,23 @@
 use anyhow::Result;
 use tao::event::Event;
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
-use tray_icon::menu::{AboutMetadata, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use tray_icon::menu::{AboutMetadata, CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{TrayIconBuilder, TrayIconEvent};
+
+/// 关于对话框里的版本说明。
+/// muda 在 Windows 上把 comments 渲染为版本行之后的独立多行文本块
+const VERSION_NOTES: &str = "CapsLock 增强小工具
+
+版本说明：
+v0.1.1
+· 改用系统键盘钩子（WH_KEYBOARD_LL）：免驱动、免管理员、解压即用
+· 修复 USB 鼠标热插拔后失灵的问题（v0.1.0 打包驱动的缺陷）
+· 托盘新增「开机启动」开关（写入当前用户注册表，可随时勾选切换）
+· v0.1.0 老用户：托盘菜单「清理驱动残留」一键移除旧驱动过滤器
+
+v0.1.0
+· 首个版本：CapsLock 组合键映射（Interception 驱动方案）";
+
 #[derive(Debug)]
 enum UserEvent {
     TrayIconEvent(TrayIconEvent),
@@ -29,17 +44,30 @@ pub fn init_tray() -> Result<()> {
 
     // 创建菜单
     let tray_menu = Menu::new();
+    // 勾选态与注册表实际状态同步；切换后若写注册表失败会回滚勾选
+    let autostart_i = CheckMenuItem::with_id(
+        "autostart",
+        "开机启动",
+        true,
+        crate::autostart::is_enabled(),
+        None,
+    );
+    let cleanup_i = MenuItem::with_id("cleanup", "清理驱动残留", true, None);
     let quit_i = MenuItem::new("退出", true, None);
     tray_menu.append_items(&[
+        &autostart_i,
+        &cleanup_i,
+        &PredefinedMenuItem::separator(),
         &quit_i,
         &PredefinedMenuItem::separator(),
         &PredefinedMenuItem::about(
             Some("关于nuna"),
             Some(AboutMetadata {
                 name: Some("nuna小程序".to_string()),
-                comments: Some("nuna小程序，增强CapsLock".to_string()),
+                // 与 Cargo.toml 的 version 自动同步，发版只改一处
+                version: Some(env!("CARGO_PKG_VERSION").to_string()),
+                comments: Some(VERSION_NOTES.to_string()),
                 authors: Some(vec!["Nuna".to_string()]),
-                short_version: Some("0.1.1".to_string()),
                 ..Default::default()
             }),
         ),
@@ -75,6 +103,24 @@ pub fn init_tray() -> Result<()> {
                 if event.id == quit_i.id() {
                     tray_icon.take();
                     *control_flow = ControlFlow::Exit;
+                } else if event.id == autostart_i.id() {
+                    // 菜单已先行翻转勾选态，这里按新状态写注册表；失败则回滚勾选
+                    let checked = autostart_i.is_checked();
+                    let result = if checked {
+                        crate::autostart::enable()
+                    } else {
+                        crate::autostart::disable()
+                    };
+                    match result {
+                        Ok(()) => log::info!("开机启动已{}", if checked { "启用" } else { "禁用" }),
+                        Err(e) => {
+                            log::error!("切换开机启动失败: {e}");
+                            autostart_i.set_checked(!checked);
+                        }
+                    }
+                } else if event.id == cleanup_i.id() {
+                    // 流程含确认弹窗 + UAC + 等子进程 + 结果弹窗，放独立线程避免卡住托盘
+                    std::thread::spawn(crate::cleanup::cleanup_flow);
                 }
             }
 
@@ -86,9 +132,12 @@ pub fn init_tray() -> Result<()> {
 /// 加载自定义托盘图标
 /// 图标内嵌进二进制，避免依赖编译期绝对路径（CI 上编译的 `CARGO_MANIFEST_DIR`
 /// 在用户机器上不存在，曾导致托盘初始化 panic 后整个程序 0xC0000409 闪退）
+///
+/// nuna.ico 由 `examples/gen_icon.rs` 生成（Windows 托盘风格的简化键帽+⇪ 箭头），
+/// 改设计后重跑该 example 即可，无需外部绘图工具。
 fn load_icon() -> tray_icon::Icon {
     let (icon_rgba, icon_width, icon_height) = {
-        let image = image::load_from_memory(include_bytes!("../../assets/panda.ico"))
+        let image = image::load_from_memory(include_bytes!("../../assets/nuna.ico"))
             .expect("Failed to decode embedded icon")
             .into_rgba8();
         let (width, height) = image.dimensions();

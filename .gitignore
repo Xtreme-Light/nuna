@@ -9,3 +9,4 @@ rawdump.log
 script/backup-*.reg
 ci_pkg_test/
 smoke_v0.1.1/
+assets/icon_on_*.png

@@ -126,6 +126,13 @@ jobs:
             输入拦截改用 Windows 低级键盘钩子（WH_KEYBOARD_LL，实现参考 kanata 的 LLHOOK 后端），
             键位映射行为与 v0.1.0 完全一致。
 
+            ### 新增功能
+
+            - 托盘菜单「开机启动」开关：勾选即开机自启（写入当前用户注册表，免管理员，随时切换）
+            - 托盘菜单「清理驱动残留」：一键清理 v0.1.0 残留驱动过滤器（自动提权、自动备份注册表、结果弹窗确认）
+            - 托盘「关于」增加版本说明，版本号随 Cargo.toml 自动同步
+            - 全新简化托盘图标（Windows 系统风格：键帽 + ⇪ 箭头）
+
             ### 修复的问题
 
             v0.1.0 打包的 Interception 驱动安装器（install-interception /install）会默认把
@@ -141,14 +148,15 @@ jobs:
 
             ### ⚠️ 从 v0.1.0 升级的用户必做
 
-            如果装过 v0.1.0（跑过 install-interception /install），请运行 zip 内附带的清理工具
-            把残留的过滤器从注册表裁掉，否则鼠标失灵问题仍会复现：
+            如果装过 v0.1.0（跑过 install-interception /install），请把残留的过滤器从注册表裁掉，
+            否则鼠标失灵问题仍会复现：
 
-            - **双击 `script\cleanup-interception.bat`**：自动请求管理员权限，移除鼠标侧 mouse 过滤器（清理后重启电脑，或重新插拔一次鼠标接收器）；
-            - v0.1.1 用户推荐彻底清理（键盘侧过滤器也一并移除）：
-              `powershell -ExecutionPolicy Bypass -File script\cleanup-interception.ps1 -RemoveKeyboardToo`
-            - 工具会自动备份注册表，双击备份的 .reg 文件即可还原；
-            - 也可以用 v0.1.0 附带的 install-interception.exe /uninstall 彻底卸载驱动本体。
+            - **推荐：托盘菜单 →「清理驱动残留」**——键盘/鼠标过滤器一并清理，
+              自动请求管理员权限（UAC），自动备份注册表，结果弹窗确认；
+            - 也可用 zip 内附带的脚本：双击 `script\cleanup-interception.bat`（默认只清鼠标侧，
+              彻底清理加 `-RemoveKeyboardToo` 参数）；
+            - 清理后重启电脑，或重新插拔一次鼠标接收器；
+            - 双击备份的 .reg 文件即可还原。
 
             ### zip 内容
 

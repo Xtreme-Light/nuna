@@ -11,6 +11,8 @@
 //!   远程桌面这类只透传按键流的会话出现按键卡住（影子按键）的问题。
 
 // 导入模块
+mod autostart;
+mod cleanup;
 mod keys;
 mod tray;
 
@@ -42,6 +44,12 @@ fn main() -> Result<()> {
     std::panic::set_hook(Box::new(|info: &std::panic::PanicHookInfo<'_>| {
         fatal_dialog("nuna 发生内部错误", &info.to_string());
     }));
+
+    // 清理子进程：必须在单实例检查之前拦截——托盘点「清理驱动残留」时，
+    // 本进程会以管理员身份带此参数重启自身，提权副本不应撞上单实例锁
+    if std::env::args().any(|a| a == "--cleanup-driver") {
+        cleanup::run_standalone_child();
+    }
 
     let instance = SingleInstance::new("nuna.exe")?;
     if !instance.is_single() {
