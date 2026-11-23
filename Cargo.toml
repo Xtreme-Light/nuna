@@ -28,3 +28,55 @@ opt-level = "z"
 lto = "fat"
 panic = "abort"
 codegen-units = 1
+
+# BeautifulRust lints（github.com/morganlinton/BeautifulRust，配套根目录 clippy.toml）。
+# 机器可查的地道 Rust 规范；CI 严格模式：cargo clippy --all-targets --all-features -- -D warnings
+# 标注 [lib] 的条目适合库，本 crate 为纯二进制，已按项目说明省略。
+[lints.rust]
+unsafe_op_in_unsafe_fn = "warn"          # 每个 unsafe 操作独立 unsafe 块
+rust_2018_idioms = { level = "warn", priority = -1 } # 2018 版惯用法（如 Formatter<'_>）
+
+[lints.clippy]
+# 组先声明，低优先级让下面的单项生效
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+
+# panic：返回错误；刻意的 panic 必须写明理由
+unwrap_used = "warn"                     # 用 ?，或 expect("为何不可能失败")
+expect_used = "allow"                    # 带理由的 expect 是认可形式
+panic_in_result_fn = "warn"              # 返回 Result 的函数不应再 panic
+missing_assert_message = "warn"          # assert! 写明断言内容（测试内豁免）
+
+# 抑制必须自证并随失效移除
+allow_attributes = "warn"                # 用 #[expect] 代替 #[allow]
+allow_attributes_without_reason = "warn" # 每处抑制写明理由
+
+# unsafe 必须有正当理由
+undocumented_unsafe_blocks = "warn"      # 每个 unsafe 块带 // SAFETY: 注释
+multiple_unsafe_ops_per_block = "warn"   # 一个 unsafe 块一个操作
+
+# API 形态
+fn_params_excessive_bools = "warn"       # bool 参数改枚举或拆方法
+struct_excessive_bools = "warn"          # 多 bool 字段改枚举或 bitflags
+clone_on_ref_ptr = "warn"                # Rc::clone(&x) 让廉价克隆可见
+redundant_clone = "warn"                 # 原值不再使用的克隆
+rc_buffer = "warn"                       # Rc<String> 改 Rc<str>
+
+# 惯用法
+string_add = "warn"                      # 用 format!/push_str，不用 +
+wildcard_imports = "warn"                # 禁 glob 导入（测试内 super::* 豁免）
+
+# 调试残留
+dbg_macro = "warn"
+todo = "warn"
+
+# 静默丢信息的转换
+as_conversions = "warn"                  # 用 From/TryFrom
+cast_possible_truncation = "warn"
+cast_sign_loss = "warn"
+
+# 实践中多为噪音、或与规范相悖的 pedantic 项
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+module_inception = "allow"
+enum_glob_use = "allow"                  # 函数内匹配时可用 Enum::*

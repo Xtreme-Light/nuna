@@ -1,5 +1,5 @@
 
-#![allow(unused)]
+#![expect(unused, reason = "VK 常量表按 Win32 全集保留，未全部使用是有意的")]
 
 
 // Taken from:

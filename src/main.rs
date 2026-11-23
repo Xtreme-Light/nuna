@@ -1,5 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-//! nuna —— CapsLock 增强小工具
+//! nuna —— `CapsLock` 增强小工具
 //!
 //! v0.1.1 起彻底移除 Interception 内核驱动依赖，改用 Windows 低级键盘钩子
 //! （`WH_KEYBOARD_LL`，实现参考 kanata 的 LLHOOK 后端与 kbremap）拦截键盘事件：
@@ -14,7 +14,7 @@
 mod keys;
 mod tray;
 
-use crate::keys::*;
+use crate::keys::{VK_CAPITAL, VK_LCONTROL, VK_SPACE, VK_BACK, VK_D, VK_DELETE, VK_A, VK_HOME, VK_E, VK_END, VK_H, VK_LEFT, VK_L, VK_RIGHT, VK_J, VK_UP, VK_K, VK_DOWN, VK_B, VK_F, VK_Z, VK_X, VK_C, VK_V, VK_W, VK_Q, VK_S, VK_PRIOR, VK_NEXT, VK_INSERT, VK_RCONTROL, VK_LSHIFT, VK_RSHIFT, VK_LMENU, VK_RMENU, VK_LWIN, VK_RWIN};
 use crate::tray::init_tray;
 use anyhow::Result;
 use crossbeam_channel::{Sender, unbounded};
@@ -26,7 +26,8 @@ use windows::core::PCWSTR;
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY,
+    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
+    VIRTUAL_KEY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, GetMessageW, MessageBoxW, PostThreadMessageW, SetWindowsHookExW, HC_ACTION,
@@ -38,7 +39,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 /// 初始化日志与低级键盘钩子，主线程运行托盘事件循环，退出时收尾
 fn main() -> Result<()> {
     // 无控制台的 GUI 程序：任何 panic 都弹窗展示，而不是无声退出只剩退出码
-    std::panic::set_hook(Box::new(|info: &std::panic::PanicHookInfo| {
+    std::panic::set_hook(Box::new(|info: &std::panic::PanicHookInfo<'_>| {
         fatal_dialog("nuna 发生内部错误", &info.to_string());
     }));
 
@@ -46,7 +47,7 @@ fn main() -> Result<()> {
     if !instance.is_single() {
         fatal_dialog("nuna", "已有实例正在运行，请勿重复启动。");
         return Err(anyhow::anyhow!("已有单实例正在执行，请勿重复启动"));
-    };
+    }
 
     init_log();
 
@@ -55,8 +56,8 @@ fn main() -> Result<()> {
     // 启动键盘钩子线程，并等待它回报「钩子已装好」+ 线程 id
     let (ready_tx, ready_rx) = unbounded::<Result<u32, String>>();
     let hook_handle = std::thread::spawn(move || {
-        if let Err(e) = keyboard_hook_thread(ready_tx) {
-            log::error!("键盘钩子线程出错: {}", e);
+        if let Err(e) = keyboard_hook_thread(&ready_tx) {
+            log::error!("键盘钩子线程出错: {e}");
             // 无控制台的 GUI 程序，致命错误必须弹窗告知并退出
             fatal_dialog("nuna 运行出错", &format!("{e:#}"));
             std::process::exit(1);
@@ -74,6 +75,8 @@ fn main() -> Result<()> {
 
     // 退出：通知钩子线程收尾（抬掉仍按着的注入键、卸载钩子）
     // WM_QUIT 特殊：即使钩子线程还没进入消息泵，也会让其 GetMessageW 立即返回 0
+    // SAFETY: PostThreadMessageW 参数均为按值传递的 POD；tid 来自钩子线程回报，
+    // 线程此时仍在消息泵中，目标有效
     unsafe {
         let _ = PostThreadMessageW(hook_tid, WM_QUIT, WPARAM(0), LPARAM(0));
     }
@@ -112,7 +115,7 @@ struct HookState {
     /// 启动后首次观测到「所有键已释放」才接管事件流，
     /// 避免接管到半截的按键流导致配对错乱（对应 v0.1.0 启动时的等待逻辑）
     armed: bool,
-    /// CapsLock 是否处于按下状态（caps 层开关）
+    /// `CapsLock` 是否处于按下状态（caps 层开关）
     caps_down: bool,
     /// caps 层内已注入且尚未抬起的键
     injected: Vec<InjectedKey>,
@@ -132,48 +135,59 @@ thread_local! {
     static HOOK: Cell<Option<HookFn>> = const { Cell::new(None) };
 }
 
-/// WH_KEYBOARD_LL 回调（WinAPI 签名）。
-/// 返回非 0 表示吞掉该事件；调用 CallNextHookEx 表示放行。
+/// `WH_KEYBOARD_LL` 回调（WinAPI 签名）。
+/// 返回非 0 表示吞掉该事件；调用 `CallNextHookEx` 表示放行。
 ///
 /// 参数含义见 <https://learn.microsoft.com/windows/win32/winmsg/lowlevelkeyboardproc>
-/// code   : <0 必须原样转发；HC_ACTION(=0) 时 wParam/lParam 携带按键消息
-/// wParam : WM_KEYDOWN / WM_KEYUP / WM_SYSKEYDOWN / WM_SYSKEYUP
+/// code   : <0 `必须原样转发；HC_ACTION(=0)` 时 wParam/lParam 携带按键消息
+/// wParam : `WM_KEYDOWN` / `WM_KEYUP` / `WM_SYSKEYDOWN` / `WM_SYSKEYUP`
 /// lParam : 指向 KBDLLHOOKSTRUCT
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    reason = "Win32 回调 ABI 的宽度转换：LPARAM 承载指针、wParam 承载 WM_* 常量、vkCode 值域 0..=255，值域均由系统约定保证"
+)]
 unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    unsafe {
-        let kb = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
+    // SAFETY: HC_ACTION 时系统保证 lParam 指向有效的 KBDLLHOOKSTRUCT；
+    // 该结构体在回调返回前一直有效（不越出本次调用使用）
+    let kb = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
 
-        // SendInput 注入的事件会再次进入本钩子：必须直接放行，否则无限递归。
-        // code != HC_ACTION 的事件按约定必须原样转发。
-        if code != HC_ACTION as i32 || kb.flags.contains(LLKHF_INJECTED) {
-            return CallNextHookEx(None, code, wparam, lparam);
+    // SendInput 注入的事件会再次进入本钩子：必须直接放行，否则无限递归。
+    // code != HC_ACTION 的事件按约定必须原样转发。
+    if code != HC_ACTION as i32 || kb.flags.contains(LLKHF_INJECTED) {
+        // SAFETY: 参数原样按值转发给钩子链下一环，无所有权/别名问题
+        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+    }
+
+    // 只处理键盘按下/抬起（含系统键 Alt 组合），其余消息转发
+    match wparam.0 as u32 {
+        WM_KEYDOWN | WM_KEYUP | WM_SYSKEYDOWN | WM_SYSKEYUP => {}
+        _ => {
+            // SAFETY: 参数原样按值转发给钩子链下一环
+            return unsafe { CallNextHookEx(None, code, wparam, lparam) };
         }
+    }
 
-        // 只处理键盘按下/抬起（含系统键 Alt 组合），其余消息转发
-        match wparam.0 as u32 {
-            WM_KEYDOWN | WM_KEYUP | WM_SYSKEYDOWN | WM_SYSKEYUP => {}
-            _ => return CallNextHookEx(None, code, wparam, lparam),
-        }
+    let ev = HookEvent {
+        vk: kb.vkCode as u16,
+        up: kb.flags.contains(LLKHF_UP),
+    };
 
-        let ev = HookEvent {
-            vk: kb.vkCode as u16,
-            up: kb.flags.contains(LLKHF_UP),
-        };
+    let mut handled = false;
+    HOOK.with(|state| {
+        // 把闭包取出、调用、再放回。注入事件已被上面过滤，
+        // 因此回调不可能重入，「取出失败」只可能是编程错误
+        let mut hook = state.take().expect("no recurse");
+        handled = hook(ev);
+        state.set(Some(hook));
+    });
 
-        let mut handled = false;
-        HOOK.with(|state| {
-            // 把闭包取出、调用、再放回。注入事件已被上面过滤，
-            // 因此回调不可能重入，「取出失败」只可能是编程错误
-            let mut hook = state.take().expect("no recurse");
-            handled = hook(ev);
-            state.set(Some(hook));
-        });
-
-        if handled {
-            LRESULT(1)
-        } else {
-            CallNextHookEx(None, code, wparam, lparam)
-        }
+    if handled {
+        LRESULT(1)
+    } else {
+        // SAFETY: 参数原样按值转发给钩子链下一环
+        unsafe { CallNextHookEx(None, code, wparam, lparam) }
     }
 }
 
@@ -183,9 +197,11 @@ struct KeyboardHook {
 }
 
 impl KeyboardHook {
-    /// 在当前线程安装 WH_KEYBOARD_LL 全局钩子。
+    /// 在当前线程安装 `WH_KEYBOARD_LL` 全局钩子。
     /// 注意：必须在调用前先把回调放入 HOOK（低级钩子回调依赖本线程泵消息）。
     fn install() -> windows::core::Result<Self> {
+        // SAFETY: 本线程将立即进入消息泵（见 keyboard_hook_thread），
+        // 满足低级钩子对安装线程泵消息的要求；句柄由 Self 持有并在 drop 时卸载
         let handle = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), None, 0)? };
         Ok(Self { handle })
     }
@@ -193,15 +209,16 @@ impl KeyboardHook {
 
 impl Drop for KeyboardHook {
     fn drop(&mut self) {
+        // SAFETY: handle 来自 SetWindowsHookExW 且未被卸载过（RAII 保证只 drop 一次）
         unsafe {
             let _ = windows::Win32::UI::WindowsAndMessaging::UnhookWindowsHookEx(self.handle);
         }
-        HOOK.with(|state| state.take());
+        HOOK.with(std::cell::Cell::take);
     }
 }
 
-/// 键盘钩子线程：安装 WH_KEYBOARD_LL + 跑消息泵，直到主线程投递 WM_QUIT
-fn keyboard_hook_thread(ready_tx: Sender<Result<u32, String>>) -> Result<()> {
+/// 键盘钩子线程：安装 `WH_KEYBOARD_LL` + 跑消息泵，直到主线程投递 `WM_QUIT`
+fn keyboard_hook_thread(ready_tx: &Sender<Result<u32, String>>) -> Result<()> {
     // 启动阶段先调用一次 GetAsyncKeyState 清掉"曾被按下"的粘滞位，
     // 让 armed 检测不被启动前的历史按键干扰（沿袭 v0.1.0 的初始化逻辑）
     init_keyboard_state();
@@ -212,7 +229,7 @@ fn keyboard_hook_thread(ready_tx: Sender<Result<u32, String>>) -> Result<()> {
     let (out_tx, out_rx) = unbounded::<Vec<VkEvent>>();
 
     let injector = std::thread::spawn(move || {
-        for batch in out_rx.iter() {
+        for batch in &out_rx {
             send_events(&batch);
         }
         log::info!("注入线程退出");
@@ -224,7 +241,7 @@ fn keyboard_hook_thread(ready_tx: Sender<Result<u32, String>>) -> Result<()> {
         caps_down: false,
         injected: Vec::new(),
     }));
-    let cb_state = state.clone();
+    let cb_state = std::rc::Rc::clone(&state);
     // 回调持有一份 Sender 克隆：退出收尾时线程本体还要用 out_tx 发送抬键事件
     let cb_out_tx = out_tx.clone();
 
@@ -271,8 +288,8 @@ fn keyboard_hook_thread(ready_tx: Sender<Result<u32, String>>) -> Result<()> {
         }
 
         // caps 层内新按下的可映射键：成对生成 按下/抬起 序列并记录
-        if st.caps_down && !ev.up {
-            if let Some((downs, ups)) = build_mapping(ev.vk) {
+        if st.caps_down && !ev.up
+            && let Some((downs, ups)) = build_mapping(ev.vk) {
                 let _ = cb_out_tx.send(downs.clone());
                 st.injected.push(InjectedKey {
                     vk: ev.vk,
@@ -281,7 +298,6 @@ fn keyboard_hook_thread(ready_tx: Sender<Result<u32, String>>) -> Result<()> {
                 });
                 return true;
             }
-        }
 
         // 其余事件（未映射的按键、以及各种未被上面命中的情况）原样放行
         false
@@ -296,11 +312,12 @@ fn keyboard_hook_thread(ready_tx: Sender<Result<u32, String>>) -> Result<()> {
             let _ = ready_tx.send(Err(msg.clone()));
             drop(out_tx);
             let _ = injector.join();
-            HOOK.with(|s| s.take());
+            HOOK.with(std::cell::Cell::take);
             return Err(anyhow::anyhow!(msg));
         }
     };
 
+    // SAFETY: 无参数，仅返回当前线程 id
     let tid = unsafe { GetCurrentThreadId() };
     if ready_tx.send(Ok(tid)).is_err() {
         // 主线程已提前退出：无需收尾注入键（armed 尚未就绪或无按键），直接清理
@@ -315,7 +332,8 @@ fn keyboard_hook_thread(ready_tx: Sender<Result<u32, String>>) -> Result<()> {
     // 返回 0（WM_QUIT）或 -1（错误）都退出
     let mut msg = MSG::default();
     loop {
-        let r = unsafe { GetMessageW(&mut msg, None, 0, 0) };
+        // SAFETY: msg 为本线程栈上的合法 MSG，GetMessageW 仅写入该结构体
+        let r = unsafe { GetMessageW(&raw mut msg, None, 0, 0) };
         if r.0 == 0 || r.0 == -1 {
             break;
         }
@@ -330,32 +348,35 @@ fn keyboard_hook_thread(ready_tx: Sender<Result<u32, String>>) -> Result<()> {
     Ok(())
 }
 
-/// 用 SendInput 以虚拟键码注入一批事件。
-/// 注入事件自带 LLKHF_INJECTED 标志，hook_proc 会直接放行，不会递归。
-/// VK 注入无需关心 E0/E1 扩展扫描码：VK_LEFT/VK_DELETE 等本身无歧义，
+/// 用 `SendInput` 以虚拟键码注入一批事件。
+/// 注入事件自带 `LLKHF_INJECTED` `标志，hook_proc` 会直接放行，不会递归。
+/// VK 注入无需关心 E0/E1 `扩展扫描码：VK_LEFT/VK_DELETE` 等本身无歧义，
 /// 这也去掉了 v0.1.0 扫描码方案里最易错的扩展键状态拼装。
 fn send_events(events: &[VkEvent]) {
     let inputs: Vec<INPUT> = events
         .iter()
-        .map(|e| {
-            let mut ki = KEYBDINPUT::default();
-            ki.wVk = VIRTUAL_KEY(e.vk);
-            if e.up {
-                ki.dwFlags |= KEYEVENTF_KEYUP;
-            }
-            INPUT {
-                r#type: INPUT_KEYBOARD,
-                Anonymous: INPUT_0 { ki },
-            }
+        .map(|e| INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VIRTUAL_KEY(e.vk),
+                    wScan: 0,
+                    dwFlags: if e.up { KEYEVENTF_KEYUP } else { KEYBD_EVENT_FLAGS(0) },
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
         })
         .collect();
-    let sent = unsafe {
-        SendInput(
-            &inputs,
-            std::mem::size_of::<INPUT>() as i32,
-        )
-    };
-    if sent != inputs.len() as u32 {
+    // SAFETY: inputs 为合法 INPUT 切片；cbSize 传单个结构体大小是 SendInput 的
+    // 约定调用方式，注入事件带 LLKHF_INJECTED 标志不会重入钩子
+    let cb_size =
+        i32::try_from(std::mem::size_of::<INPUT>()).expect("INPUT 结构体大小必在 i32 范围内");
+    // SAFETY: inputs 为合法 INPUT 切片，cbSize 为单个结构体大小（SendInput 约定）；
+    // 注入事件带 LLKHF_INJECTED 标志，hook_proc 会放行，不会重入
+    let sent = unsafe { SendInput(&inputs, cb_size) };
+    let sent_len = usize::try_from(sent).expect("u32 必可放入 usize（x64 目标）");
+    if sent_len != inputs.len() {
         log::error!("SendInput 部分失败: 期望注入 {} 个事件，实际 {}", inputs.len(), sent);
     }
 }
@@ -430,6 +451,7 @@ fn fatal_dialog(title: &str, text: &str) {
     }
     let title = wide(title);
     let text = wide(text);
+    // SAFETY: UTF-16 缓冲区以 NUL 结尾（wide() 保证），且在调用期间保持存活
     unsafe {
         MessageBoxW(
             None,
@@ -446,7 +468,7 @@ fn init_log() {
     let mut log_config = ConfigBuilder::new();
     if let Err(e) = log_config.set_time_offset_to_local() {
         eprintln!("警告: 无法进行日期本地化: {e:?}");
-    };
+    }
 
     // 初始化组合日志器，输出终端日志
     CombinedLogger::init(vec![TermLogger::new(
@@ -487,6 +509,7 @@ pub fn init_keyboard_state() {
             VK_RWIN, // Win
         ];
         for &vk in &weird {
+            // SAFETY: 无副作用参数，仅读取异步键态并清粘滞位
             unsafe {
                 windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(i32::from(vk));
             }
@@ -511,6 +534,7 @@ pub fn are_all_keys_released() -> bool {
     ];
 
     for code in 1u16..=255u16 {
+        // SAFETY: 无副作用参数，仅读取异步键态
         let state = unsafe {
             windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(i32::from(code))
         };

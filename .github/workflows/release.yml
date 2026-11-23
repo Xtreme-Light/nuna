@@ -4,7 +4,9 @@ name: Windows Build and Release
 # 1. 推送 v* 标签：构建并自动创建 GitHub Release（推荐的发版方式）
 # 2. 在 GitHub 页面上手动创建 Release：构建并把产物挂到该 Release
 # 3. 推送 master（非文档改动）：仅构建，产物放在 Actions Artifacts
+# 4. Actions 页面手动触发：打标签前先验证构建，避免 tag 推上去构建失败还要删 Release
 on:
+  workflow_dispatch: {}  # 支持在Actions页面手动触发构建（任意分支）
   release:
     types: [created]
   push:

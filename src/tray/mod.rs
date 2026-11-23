@@ -62,7 +62,7 @@ pub fn init_tray() -> Result<()> {
                         .with_tooltip("nuna - CapsLock增强小工具")
                         .with_icon(icon)
                         .build()
-                        .unwrap(),
+                        .expect("托盘图标创建失败（图标已内嵌且事件循环已启动）"),
                 );
             }
 
@@ -84,7 +84,7 @@ pub fn init_tray() -> Result<()> {
 }
 
 /// 加载自定义托盘图标
-/// 图标内嵌进二进制，避免依赖编译期绝对路径（CI 上编译的 CARGO_MANIFEST_DIR
+/// 图标内嵌进二进制，避免依赖编译期绝对路径（CI 上编译的 `CARGO_MANIFEST_DIR`
 /// 在用户机器上不存在，曾导致托盘初始化 panic 后整个程序 0xC0000409 闪退）
 fn load_icon() -> tray_icon::Icon {
     let (icon_rgba, icon_width, icon_height) = {
