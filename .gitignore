@@ -6,3 +6,6 @@ release_dir/
 *.zip
 run.log
 rawdump.log
+script/backup-*.reg
+ci_pkg_test/
+smoke_v0.1.1/
